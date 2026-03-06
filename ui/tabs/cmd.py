@@ -1,0 +1,66 @@
+from PyQt6.QtWidgets import (
+    QWidget, QCheckBox, QLineEdit, QVBoxLayout
+)
+from ui.widgets.card import CardWidget, grid_in_card, add_row, add_row_full_width
+
+
+class CmdTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(4, 4, 4, 4)
+        vbox.setSpacing(3)
+
+        # ── Card Opções ───────────────────────────────────────────────────────
+        card_opts = CardWidget("\uE115", self.tr("Opções"))  # Engrenagem = opções/switches
+        g1 = grid_in_card(card_opts)
+        row = 0
+
+        self.c_checkbox = QCheckBox(self.tr("/C (Executa comando e sai)"))
+        self.c_checkbox.setChecked(False)
+        add_row_full_width(g1, row, self.c_checkbox)
+        row += 1
+
+        self.k_checkbox = QCheckBox(self.tr("/K (Executa comando e permanece)"))
+        self.k_checkbox.setChecked(False)
+        add_row_full_width(g1, row, self.k_checkbox)
+        row += 1
+
+        self.q_checkbox = QCheckBox(self.tr("/Q (Desativa echo)"))
+        self.q_checkbox.setChecked(False)
+        add_row_full_width(g1, row, self.q_checkbox)
+        row += 1
+
+        self.d_checkbox = QCheckBox(self.tr("/D (Desativa AutoRun)"))
+        self.d_checkbox.setChecked(False)
+        add_row_full_width(g1, row, self.d_checkbox)
+        row += 1
+
+        self.s_checkbox = QCheckBox(self.tr("/S (Modifica tratamento de aspas)"))
+        self.s_checkbox.setChecked(False)
+        add_row_full_width(g1, row, self.s_checkbox)
+
+        vbox.addWidget(card_opts)
+
+        # ── Card Comando ───────────────────────────────────────────────────────
+        card_cmd = CardWidget("\uE768", self.tr("Comando"))  # Play = executar comando
+        g2 = grid_in_card(card_cmd)
+
+        self.command_edit = QLineEdit()
+        self.command_edit.setPlaceholderText(self.tr("Comando ou script .bat"))
+        add_row(g2, 0, self.tr("Comando:"), self.command_edit)
+
+        vbox.addWidget(card_cmd)
+
+    def get_params(self):
+        return {
+            '/C': self.c_checkbox.isChecked(),
+            '/K': self.k_checkbox.isChecked(),
+            '/Q': self.q_checkbox.isChecked(),
+            '/D': self.d_checkbox.isChecked(),
+            '/S': self.s_checkbox.isChecked(),
+            'Command': self.command_edit.text(),
+        }
+
+    def set_command_field_enabled(self, enabled: bool):
+        self.command_edit.setEnabled(enabled)
