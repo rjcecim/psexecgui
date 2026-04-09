@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QToolButton
 )
 from PyQt6.QtGui import QFont
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from utils.api import get_processor_groups, get_processor_count
 from ui.style import ICON_FONT_PT, CARD_GRID_VERTICAL_SPACING
 from utils.validator import AffinityValidator
@@ -119,6 +119,8 @@ def _line_edit_with_clear_icon(password: bool = False):
 # ── tab principal ─────────────────────────────────────────────────────────────
 
 class PsExecTab(QWidget):
+    openPsInfoRequested = pyqtSignal()
+
     def __init__(self, parent=None, log_output=None):
         super().__init__(parent)
         self.log_output = log_output
@@ -162,8 +164,11 @@ class PsExecTab(QWidget):
         self.host_edit.setToolTip(self.tr("Nome ou IP do computador remoto"))
         self.ping_button = _icon_button("\uEA18", self.tr("Ping para o host"))
         self.ping_button.clicked.connect(self.ping_host)
+        self.psinfo_button = _icon_button("\uE946", self.tr("Abrir PsInfo (inventário)"))
+        self.psinfo_button.clicked.connect(self.openPsInfoRequested.emit)
         host_row.addWidget(host_clear_container)
         host_row.addWidget(self.ping_button)
+        host_row.addWidget(self.psinfo_button)
         host_container = QWidget()
         host_container.setLayout(host_row)
         host_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)

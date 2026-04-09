@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy,
-    QGridLayout,
+    QGridLayout, QToolButton,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QPalette
@@ -50,6 +50,8 @@ class CardWidget(QWidget):
     def __init__(self, icon_char: str, title: str, parent=None):
         super().__init__(parent)
         self._setup_style()
+        self._is_collapsible = False
+        self._is_collapsed = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -85,27 +87,63 @@ class CardWidget(QWidget):
         self._title_label.setWordWrap(False)
         self._title_label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
 
+        self._toggle_btn = QToolButton()
+        self._toggle_btn.setObjectName("cardToggle")
+        self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._toggle_btn.setAutoRaise(True)
+        self._toggle_btn.setFixedSize(22, 22)
+        self._toggle_btn.setFont(QFont("Segoe MDL2 Assets", 10))
+        self._toggle_btn.clicked.connect(self.toggle_collapsed)
+        self._toggle_btn.hide()
+
         header.addWidget(self._icon_label)
         header.addWidget(self._title_label)
+        header.addWidget(self._toggle_btn)
         header.addStretch()
 
         container_layout.addWidget(header_widget)
 
         # Linha divisória
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setObjectName("cardDivider")
-        divider.setFixedHeight(1)
-        container_layout.addWidget(divider)
+        self._divider = QFrame()
+        self._divider.setFrameShape(QFrame.Shape.HLine)
+        self._divider.setObjectName("cardDivider")
+        self._divider.setFixedHeight(1)
+        container_layout.addWidget(self._divider)
         container_layout.addSpacing(2)
 
         # Área de conteúdo — o chamador adiciona widgets aqui
-        self.content_layout = QVBoxLayout()
+        self._content_widget = QWidget()
+        self.content_layout = QVBoxLayout(self._content_widget)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(CARD_GRID_VERTICAL_SPACING)
-        container_layout.addLayout(self.content_layout)
+        container_layout.addWidget(self._content_widget)
 
         outer.addWidget(self._container)
+
+    def set_collapsible(self, collapsible: bool = True, collapsed: bool = False) -> None:
+        self._is_collapsible = bool(collapsible)
+        self._toggle_btn.setVisible(self._is_collapsible)
+        if self._is_collapsible:
+            self.set_collapsed(bool(collapsed))
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._is_collapsed = bool(collapsed)
+        if not self._is_collapsible:
+            self._content_widget.setVisible(True)
+            self._divider.setVisible(True)
+            self._toggle_btn.hide()
+            return
+        self._content_widget.setVisible(not self._is_collapsed)
+        self._divider.setVisible(not self._is_collapsed)
+        # \uE70D = ChevronDown, \uE70E = ChevronUp
+        self._toggle_btn.setText("\uE70E" if self._is_collapsed else "\uE70D")
+        self._toggle_btn.setToolTip("Expandir" if self._is_collapsed else "Ocultar")
+
+    def toggle_collapsed(self) -> None:
+        if not self._is_collapsible:
+            return
+        self.set_collapsed(not self._is_collapsed)
 
     def _setup_style(self):
         self.setStyleSheet("""
@@ -119,6 +157,17 @@ class CardWidget(QWidget):
             }
             QLabel#cardTitle {
                 color: palette(windowText);
+            }
+            QToolButton#cardToggle {
+                border: none;
+                background: transparent;
+                color: palette(windowText);
+                opacity: 0.75;
+            }
+            QToolButton#cardToggle:hover {
+                background: palette(light);
+                border-radius: 4px;
+                opacity: 1.0;
             }
             QFrame#cardDivider {
                 color: palette(mid);

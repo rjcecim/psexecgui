@@ -1,4 +1,4 @@
-# Documentação técnica — PSExecGUI v3
+# Documentação técnica — PSExecGUI v4
 
 Lógicas completas de **Backend** (montagem e execução de comandos) e **Frontend** (interface, abas, sinais e estado).
 
@@ -105,6 +105,11 @@ Executa um comando em um **ThreadPoolExecutor** (1 worker) e emite sinais Qt par
 - **`utils/api.py`**  
   Usa `kernel32` (ctypes) para: `get_processor_groups()`, `get_processor_count(group_id)`, `get_all_processor_info()`. Usado na aba PsExec para grupo CPU e afinidade.
 
+- **`utils/psinfo.py`**  
+  Parser do output do **PsInfo64.exe** (Sysinternals) para inventário remoto:
+  - `parse_psinfo_output(text)`: extrai **Sistema** (chave/valor), **Aplicativos** (`-s`) e **tabela de discos** (`-d`).
+  - `parse_disks_table(disks_raw)`: converte a tabela de volumes do `PsInfo -d` em linhas estruturadas (para exibir em tabela na UI).
+
 - **`utils/validator.py`**  
   `AffinityValidator`: valida valor de afinidade CPU (ex.: "1,2,3") conforme número máximo de CPUs do grupo selecionado.
 
@@ -116,10 +121,13 @@ Executa um comando em um **ThreadPoolExecutor** (1 worker) e emite sinais Qt par
 
 Janela principal: barra de seleção de arquivo/pasta, **QTabWidget** (PsExec + abas condicionais), preview do comando, botões Executar/Parar/Reiniciar e área de log.
 
+Além disso, há uma aba de inventário **PsInfo** que é criada **sob demanda** (não aparece no startup).
+
 ### Inicialização
 
 - Cria **FileSelectorWidget**, **PsExecTab**, **MsiTab**, **RobocopyTab**, **PowerShellTab**, **CmdTab**, **CommandPreviewWidget**, **LogOutputWidget**.  
 - Adiciona só a aba PsExec; MSI, PowerShell, CMD e Robocopy são adicionadas/removidas dinamicamente.  
+- **PsInfo**: a aba não é criada no `__init__`; ela é criada e inserida quando o usuário solicita (botão ℹ️ na aba PsExec).  
 - Instancia **CommandBuilder** e **Executor**.  
 - Conecta todos os sinais dos widgets a `update_command`, `on_file_selected`, `on_run`, `on_stop`, `on_restart`, `on_remote_cmd_edit_changed`, e sinais do executor ao log e `on_process_finished`.  
 - Chama `update_command()` uma vez no fim do `__init__`.  
@@ -142,11 +150,26 @@ Janela principal: barra de seleção de arquivo/pasta, **QTabWidget** (PsExec + 
   - Caso contrário retorna `True`.
 
 - **`update_tab_visibility(is_msi, is_exe)`**  
-  - Remove todas as abas exceto a primeira (PsExec).  
+  - Remove todas as abas extras, preservando **PsExec** e (se existir) **PsInfo**.  
   - **MSI**: adiciona aba MSI se `is_msi`.  
   - **PowerShell**: adiciona se extensão é `ps1` ou se comando remoto é `powershell`/`powershell.exe`; em caso de arquivo .ps1, desabilita campos de comando da aba PowerShell (`set_command_fields_enabled(False)`).  
   - **CMD**: adiciona se extensão é `bat` ou se comando remoto é `cmd`/`cmd.exe`; em caso de arquivo .bat, desabilita campo de comando (`set_command_field_enabled(False)`).  
   - **Robocopy**: adiciona se `should_enable_robocopy()`.
+
+### Abertura da aba PsInfo (sob demanda)
+
+- **`open_psinfo_tab()`**  
+  - Valida se há host preenchido (senão, loga mensagem).  
+  - Se a aba PsInfo já existir, apenas foca e **re-executa** a coleta para o host atual.  
+  - Se não existir, cria `PsInfoTab`, insere na posição 1 (logo após PsExec), foca na aba e executa a coleta.
+
+### Modo PsInfo (UI enxuta)
+
+- **`_update_psinfo_mode_ui()`**  
+  Quando a aba atual é **PsInfo**, oculta elementos que não se aplicam ao inventário:
+  - Preview do comando (`CommandPreviewWidget`)
+  - Log de Execução (`LogOutputWidget`)
+  - Botões Play/Stop/Restart
 
 ### Montagem do comando para preview e execução
 
@@ -220,9 +243,24 @@ Janela principal: barra de seleção de arquivo/pasta, **QTabWidget** (PsExec + 
 - **Cards**: Conexão, Autenticação, Privilégios e Sessão, Desempenho, Flags e Argumentos.  
 - Helper **`_line_edit_with_clear_icon()`**: retorna um container (QWidget com borda) contendo QLineEdit + QToolButton (ícone X). O botão aparece quando há texto e, ao clicar, limpa o campo. Usado em: PsExec path (não), Host, Comando remoto, Usuário, Senha, Args extras.  
 - Host: container com clear + botão Ping (abre cmd com `ping -n 4 -w 1000 <host>`).  
+- Host: botão **ℹ️ PsInfo** ao lado do Ping emite um sinal (`openPsInfoRequested`) para a janela principal abrir a aba de inventário.
 - Autenticação: usuário e senha (QLineEdit com clear).  
 - Desempenho: prioridade, grupo CPU (via `utils.api`), afinidade (com `AffinityValidator`).  
 - Flags: checkboxes para -d, -e, -c, -f, -v, -accepteula, -nobanner; timeout; args extras (com clear).
+
+### Aba PsInfo (`ui/tabs/psinfo.py`)
+
+Tela de inventário remoto baseada no **PsInfo64.exe**.
+
+- **Criação**: criada sob demanda (quando o usuário clica no botão ℹ️ ao lado do Ping).  
+- **Execução**: ao abrir (ou ao clicar novamente), executa automaticamente:
+  - `PsInfo64.exe \\HOST -s -d -accepteula -nobanner`
+- **Decodificação**: captura stdout/stderr em bytes e decodifica com fallback (`utf-8-sig` → `mbcs` → `cp1252`) para preservar acentuação (PT-BR).  
+- **UI (cards)**:
+  - **Sistema**: grade chave/valor alinhada.
+  - **Aplicativos**: lista com busca + contador.
+  - **Discos**: tabela com colunas (Volume/Tipo/Formato/Rótulo/Tamanho/Livre/% Livre).
+- **Cards colapsáveis**: os cards de resultado suportam ocultar/expandir.
 
 ### Aba MSI (`ui/tabs/msi.py`)
 
@@ -262,7 +300,8 @@ Janela principal: barra de seleção de arquivo/pasta, **QTabWidget** (PsExec + 
 ### CardWidget (`ui/widgets/card.py`)
 
 - Card com ícone (Unicode Segoe MDL2), título e conteúdo em grid.  
-- Funções: `make_field_label`, `add_row`, `add_row_full_width`, `grid_in_card`.
+- Funções: `make_field_label`, `add_row`, `add_row_full_width`, `grid_in_card`.  
+- **Colapsável**: `set_collapsible()` / `set_collapsed()` adiciona um toggle no header para ocultar/expandir o conteúdo do card.
 
 ### Estilo global (`ui/style.py`)
 
@@ -289,4 +328,4 @@ Janela principal: barra de seleção de arquivo/pasta, **QTabWidget** (PsExec + 
 5. **on_run** usa o mesmo **build_command_for_execution()**, grava no log e executa via **Executor** (robocopy) e/ou **subprocess** (PsExec em cmd externo).  
 6. **Executor** emite **outputReceived** / **errorReceived** / **finished** → log e botões são atualizados.
 
-Isso encerra a documentação das lógicas de Backend e Frontend do PSExecGUI v3.
+Isso encerra a documentação das lógicas de Backend e Frontend do PSExecGUI v4.

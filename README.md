@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows" />
 </p>
 
-# 🖥️ PSExecGUI v3
+# 🖥️ PSExecGUI v4
 
 > Interface gráfica para execução remota de comandos e instalação de arquivos em máquinas Windows via **PsExec** (PSTools).
 
@@ -44,6 +44,7 @@ Interface moderna, preview em tempo real e abas dinâmicas conforme o tipo de ar
 | 🐍 **Python** | 3.x |
 | 🎨 **PyQt6** | Interface gráfica |
 | 🔧 **PsExec** | PSTools — caminho configurável (padrão: `C:\PSTools\PsExec.exe`) |
+| ℹ️ **PsInfo64** | PSTools — usado para inventário remoto (padrão: `C:\PSTools\PsInfo64.exe`) |
 | 🌐 **Rede** | Acesso ao host remoto (SMB), credenciais se necessário |
 
 ---
@@ -52,7 +53,7 @@ Interface moderna, preview em tempo real e abas dinâmicas conforme o tipo de ar
 
 ```bash
 # Clone ou baixe o projeto e entre na pasta
-cd PSExecGUIv3
+cd PSExecGUIv4
 
 # Crie um ambiente virtual (recomendado)
 python -m venv .venv
@@ -66,10 +67,10 @@ pip install PyQt6
 
 ```bash
 pip install pyinstaller
-pyinstaller PSExecGUIv3.spec
+pyinstaller PSExecGUIv4.spec
 ```
 
-O executável será gerado em **`dist/PSExecGUIv3.exe`**.
+O executável será gerado em **`dist/PSExecGUIv4.exe`**.
 
 ---
 
@@ -85,6 +86,15 @@ python main.py
 4. 👁️ Confira o **preview** do comando e clique em **Executar** ▶️.
 
 O comando é aberto em um terminal externo para você acompanhar a saída.
+
+### ℹ️ Inventário remoto (PsInfo)
+
+1. ✏️ Preencha **Host remoto** na aba **PsExec**.
+2. Clique no botão **ℹ️ PsInfo** ao lado do **Ping**.
+3. A aba **PsInfo** abre e coleta automaticamente **Sistema + Aplicativos + Discos** usando:
+   - `PsInfo64.exe \\HOST -s -d -accepteula -nobanner`
+
+Na aba **PsInfo**, os cards podem ser **ocultados/expandidos** e o app **esconde** o preview do comando, o log e os botões Play/Stop/Restart (porque não se aplicam ao inventário).
 
 ---
 
@@ -108,6 +118,16 @@ O comando é aberto em um terminal externo para você acompanhar a saída.
 
 Campos de texto (Host, Comando remoto, Usuário, Senha, Args extras) têm **ícone de limpar** 🗑️ no final quando há conteúdo.
 
+### ℹ️ Aba PsInfo (sob demanda)
+
+| Card | Conteúdo |
+|------|----------|
+| 🖥️ **Sistema** | Informações do Windows/CPU/RAM/etc em grade (chave/valor) |
+| 📦 **Aplicativos** | Lista com busca + contador de itens visíveis |
+| 💾 **Discos** | Tabela com Volume/Tipo/Formato/Rótulo/Tamanho/Livre/% |
+
+> A aba PsInfo só aparece quando você clica no botão de informação (ℹ️) ao lado do Ping.
+
 ### 📑 Abas dinâmicas
 
 | Aba | Quando aparece | Principais opções |
@@ -130,7 +150,7 @@ Campos de texto (Host, Comando remoto, Usuário, Senha, Args extras) têm **íco
 ## 📁 Estrutura do projeto
 
 ```
-PSExecGUIv3/
+PSExecGUIv4/
 ├── main.py                 # Entrada e janela principal
 ├── core/
 │   ├── builder.py          # Montagem PsExec, Robocopy, msiexec
@@ -138,12 +158,13 @@ PSExecGUIv3/
 ├── ui/
 │   ├── style.py            # Estilos globais
 │   ├── mica.py             # Efeito Mica (Windows 11)
-│   ├── tabs/               # psexec, msi, robocopy, powershell, cmd
+│   ├── tabs/               # psexec, psinfo, msi, robocopy, powershell, cmd
 │   └── widgets/            # selector, preview, log, card, flow
 ├── utils/
 │   ├── api.py              # API Windows (processadores)
+│   ├── psinfo.py            # Parse do output do PsInfo (inventário)
 │   └── validator.py        # Validadores (afinidade, etc.)
-├── PSExecGUIv3.spec        # PyInstaller (exe sem console)
+├── PSExecGUIv4.spec        # PyInstaller (exe sem console)
 ├── README.md
 └── documentation.md        # Lógicas Backend e Frontend
 ```

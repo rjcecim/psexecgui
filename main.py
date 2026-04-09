@@ -17,6 +17,7 @@ from core.executor import Executor
 import subprocess
 from ui.tabs.powershell import PowerShellTab
 from ui.tabs.cmd import CmdTab
+from ui.tabs.psinfo import PsInfoTab
 from ui.mica import enable_mica_for_widget
 import datetime
 
@@ -131,6 +132,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabBar(_Mdl2TabBar(self.tabs))
         self.log_output = LogOutputWidget()
         self.psexec_tab = PsExecTab(log_output=self.log_output)
+        self.psinfo_tab = None
         self.msi_tab = MsiTab()
         self.robocopy_tab = RobocopyTab()
         self.powershell_tab = PowerShellTab()
@@ -171,6 +173,7 @@ class MainWindow(QMainWindow):
         # Conexões
         self.file_selector.fileSelected.connect(self.on_file_selected)
         self.psexec_tab.host_edit.textChanged.connect(self.update_command)
+        self.psexec_tab.openPsInfoRequested.connect(self.open_psinfo_tab)
         self.psexec_tab.psexec_path_edit.textChanged.connect(self.update_command)
         self.psexec_tab.user_edit.textChanged.connect(self.update_command)
         self.psexec_tab.pass_edit.textChanged.connect(self.update_command)
@@ -205,11 +208,13 @@ class MainWindow(QMainWindow):
         self.executor.outputReceived.connect(self.log_output.append_log)
         self.executor.errorReceived.connect(self.log_output.append_log)
         self.executor.finished.connect(self.on_process_finished)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         
         # Estado inicial: não adiciona a aba MSI nem Robocopy
         self.msi_tab_index = None
         self.robocopy_tab_index = None
         self.update_command()
+        self._update_psinfo_mode_ui()
 
         # Conexões das abas PowerShellTab
         self.powershell_tab.noprofile_checkbox.stateChanged.connect(self.update_command)
@@ -225,6 +230,47 @@ class MainWindow(QMainWindow):
         self.cmd_tab.d_checkbox.stateChanged.connect(self.update_command)
         self.cmd_tab.s_checkbox.stateChanged.connect(self.update_command)
         self.cmd_tab.command_edit.textChanged.connect(self.update_command)
+
+    def open_psinfo_tab(self) -> None:
+        """
+        Cria a aba PsInfo sob demanda e foca nela.
+        """
+        host = self.psexec_tab.host_edit.text().strip()
+        if not host:
+            self.log_output.append_log(self.tr("[PSINFO] Preencha o Host remoto antes de abrir o PsInfo."))
+            return
+
+        # Se já existe, apenas focar
+        if self.psinfo_tab is not None:
+            idx = self.tabs.indexOf(self.psinfo_tab)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
+                # Sempre re-executar para o host atual
+                self.psinfo_tab.run_psinfo()
+                self._update_psinfo_mode_ui()
+                return
+
+        self.psinfo_tab = PsInfoTab(log_output=self.log_output, host_source=self.psexec_tab.host_edit)
+        # Inserir logo após PsExec (índice 1)
+        self.tabs.insertTab(1, self.psinfo_tab, self.tr("PsInfo"))
+        self.tabs.tabBar().setTabData(1, "\uE946")  # Info
+        self.tabs.setCurrentIndex(1)
+        self.psinfo_tab.run_psinfo()
+        self._update_psinfo_mode_ui()
+
+    def _on_tab_changed(self, _index: int) -> None:
+        self._update_psinfo_mode_ui()
+
+    def _update_psinfo_mode_ui(self) -> None:
+        """
+        A aba PsInfo é uma tela de inventário; não precisa do preview do comando e log.
+        """
+        is_psinfo = self.psinfo_tab is not None and self.tabs.currentWidget() == self.psinfo_tab
+        self.command_preview.setVisible(not is_psinfo)
+        self.log_output.setVisible(not is_psinfo)
+        self.run_button.setVisible(not is_psinfo)
+        self.stop_button.setVisible(not is_psinfo)
+        self.restart_button.setVisible(not is_psinfo)
 
     def _apply_initial_geometry(self):
         """
@@ -305,7 +351,7 @@ class MainWindow(QMainWindow):
         return True
 
     def update_tab_visibility(self, is_msi, is_exe):
-        """Atualiza a visibilidade das abas mantendo a ordem: PsExec, MSI, PowerShell, CMD, Robocopy"""
+        """Atualiza a visibilidade das abas mantendo a ordem: PsExec, (PsInfo opcional), MSI, PowerShell, CMD, Robocopy"""
         robocopy_enabled = self.should_enable_robocopy()
         selected_file = self.file_selector.selected_file if hasattr(self.file_selector, 'selected_file') else None
         ext = selected_file.lower().split('.')[-1] if selected_file and '.' in selected_file else ''
@@ -328,9 +374,12 @@ class MainWindow(QMainWindow):
         if remote_cmd in ['cmd', 'cmd.exe']:
             show_cmd_tab = True
             cmd_by_file = False
-        # Remove todas as abas exceto PsExec
-        while self.tabs.count() > 1:
-            self.tabs.removeTab(1)
+        # Remove todas as abas extras, preservando PsExec e (se existir) PsInfo
+        base_count = 1
+        if self.psinfo_tab is not None and self.tabs.indexOf(self.psinfo_tab) != -1:
+            base_count = 2
+        while self.tabs.count() > base_count:
+            self.tabs.removeTab(base_count)
         # Adiciona MSI / PowerShell / CMD / Robocopy (ícone = char Unicode)
         # \uE8A5 = Package/MSI, \uE756 = PowerShell, \uE7ED = CMD/Console, \uE8B7 = Copy/Robocopy
         if is_msi:
