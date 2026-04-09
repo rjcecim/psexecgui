@@ -15,6 +15,7 @@ from ui.widgets.preview import CommandPreviewWidget
 from ui.widgets.log import LogOutputWidget
 from core.executor import Executor
 import subprocess
+import re
 from ui.tabs.powershell import PowerShellTab
 from ui.tabs.cmd import CmdTab
 from ui.tabs.psinfo import PsInfoTab
@@ -170,11 +171,15 @@ class MainWindow(QMainWindow):
         # Instâncias auxiliares
         self.command_builder = CommandBuilder()
         self.executor = Executor()
+        self._rustdesk_collecting = False
+        self._rustdesk_out_lines = []
+        self._rustdesk_err_lines = []
         
         # Conexões
         self.file_selector.fileSelected.connect(self.on_file_selected)
         self.psexec_tab.host_edit.textChanged.connect(self.update_command)
         self.psexec_tab.openPsInfoRequested.connect(self.open_psinfo_tab)
+        self.psexec_tab.openRustDeskRequested.connect(self.on_rustdesk_clicked)
         self.psexec_tab.psexec_path_edit.textChanged.connect(self.update_command)
         self.psexec_tab.user_edit.textChanged.connect(self.update_command)
         self.psexec_tab.pass_edit.textChanged.connect(self.update_command)
@@ -217,6 +222,193 @@ class MainWindow(QMainWindow):
         self.update_command()
         self._update_psinfo_mode_ui()
         self._last_tab_widget = self.tabs.currentWidget()
+
+    def _escape_quotes(self, s: str) -> str:
+        return (s or "").replace('"', '\\"')
+
+    def _quote_if_needed(self, s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            return s
+        return f'"{s}"' if " " in s else s
+
+    def _build_psexec_exe(self) -> str:
+        p = (self.psexec_tab.psexec_path_edit.text() or "").strip()
+        if p:
+            p = os.path.normpath(p.replace('"', "").replace("'", ""))
+            return self._quote_if_needed(p)
+        return "PsExec.exe"
+
+    def on_rustdesk_clicked(self) -> None:
+        """
+        Fluxo:
+        1) Executa remoto: rustdesk.exe --get-id (via PsExec com -h -s)
+        2) Extrai ID do stdout
+        3) Executa local: rustdesk.exe --id <ID>
+        """
+        host = (self.psexec_tab.host_edit.text() or "").strip().strip("\\")
+        if not host:
+            ph = self.psexec_tab.host_edit.placeholderText()
+            self.log_output.append_log(self.tr(f"[RUSTDESK] Por favor, insira um host ({ph})."))
+            return
+
+        # Não interferir em execuções internas em andamento (robocopy etc.)
+        if getattr(self.executor, "future", None) is not None or getattr(self.executor, "process", None) is not None:
+            self.log_output.append_log(self.tr("[RUSTDESK] Aguarde a execução atual terminar antes de usar RustDesk."))
+            return
+
+        if self._rustdesk_collecting:
+            return
+
+        self._rustdesk_collecting = True
+        self._rustdesk_out_lines = []
+        self._rustdesk_err_lines = []
+        self._rustdesk_last_path = None
+
+        psexec_exe = self._build_psexec_exe()
+        user = (self.psexec_tab.user_edit.text() or "").strip()
+        password = (self.psexec_tab.pass_edit.text() or "").strip()
+
+        creds = ""
+        if user:
+            creds += f' -u "{self._escape_quotes(user)}"'
+        if password:
+            creds += f' -p "{self._escape_quotes(password)}"'
+
+        # Forçar elevação para coletar ID de forma mais consistente
+        forced_flags = " -h -s -accepteula -nobanner"
+
+        rustdesk_remote_paths = [
+            r"C:\Program Files\RustDesk\rustdesk.exe",
+            r"C:\Program Files (x86)\RustDesk\rustdesk.exe",
+        ]
+
+        def build_cmd(remote_path: str) -> str:
+            # Formato solicitado:
+            # PsExec.exe \\HOST -h -s "C:\Program Files\RustDesk\rustdesk.exe" --get-id
+            return f'{psexec_exe} \\\\{host}{creds}{forced_flags} "{remote_path}" --get-id'
+
+        cmd = build_cmd(rustdesk_remote_paths[0])
+
+        self.log_output.append_log(self.tr(f"[RUSTDESK] Conectando em {host} e coletando ID..."))
+
+        def on_out(line: str) -> None:
+            if line is None:
+                return
+            t = str(line).strip()
+            if t:
+                self._rustdesk_out_lines.append(t)
+
+        def on_err(line: str) -> None:
+            if line is None:
+                return
+            t = str(line).strip()
+            if t:
+                self._rustdesk_err_lines.append(t)
+
+        def on_done(exit_code: int) -> None:
+            # desconectar handlers temporários
+            try:
+                self.executor.outputReceived.disconnect(on_out)
+            except Exception:
+                pass
+            try:
+                self.executor.errorReceived.disconnect(on_err)
+            except Exception:
+                pass
+            try:
+                self.executor.finished.disconnect(on_done)
+            except Exception:
+                pass
+
+            self._rustdesk_collecting = False
+
+            out_text = "\n".join(self._rustdesk_out_lines).strip()
+            err_text = "\n".join(self._rustdesk_err_lines).strip()
+
+            # 1) Tenta extrair ID do stdout (geralmente vem só o número)
+            rust_id = ""
+            for ln in self._rustdesk_out_lines:
+                cand = re.sub(r"\D", "", ln)
+                if len(cand) >= 6:
+                    rust_id = cand
+                    break
+
+            # 2) Se não achou ID, e parece "arquivo não encontrado", tentar o segundo caminho e repetir 1 vez
+            not_found_markers = [
+                "could not be found",
+                "não foi possível encontrar",
+                "nao foi possivel encontrar",
+                "não foi encontrado",
+                "nao foi encontrado",
+                "o sistema não pode encontrar",
+                "o sistema nao pode encontrar",
+            ]
+            is_not_found = any(m in (err_text.lower() if err_text else "") for m in not_found_markers)
+
+            if not rust_id and is_not_found and getattr(self, "_rustdesk_last_path", None) != rustdesk_remote_paths[1]:
+                # segunda tentativa
+                self._rustdesk_last_path = rustdesk_remote_paths[1]
+                self._rustdesk_collecting = True
+                self._rustdesk_out_lines = []
+                self._rustdesk_err_lines = []
+
+                self.log_output.append_log(self.tr("[RUSTDESK] Tentando caminho alternativo do RustDesk no host..."))
+
+                self.executor.outputReceived.connect(on_out)
+                self.executor.errorReceived.connect(on_err)
+                self.executor.finished.connect(on_done)
+                self.executor.run(build_cmd(rustdesk_remote_paths[1]))
+                return
+
+            if not rust_id:
+                if exit_code != 0 and ("couldn't access" in err_text.lower() or "couldnt access" in err_text.lower()):
+                    # PsExec não conseguiu acessar o host
+                    self.log_output.append_log(self.tr("[RUSTDESK] ERRO: Não foi possível conectar ao host (rede/RPC/credenciais)."))
+                    if err_text:
+                        self.log_output.append_log(self.tr(f"[RUSTDESK] Detalhes: {err_text}"))
+                elif is_not_found:
+                    self.log_output.append_log(self.tr("[RUSTDESK] ERRO: RustDesk não encontrado no host."))
+                elif err_text:
+                    self.log_output.append_log(self.tr(f"[RUSTDESK] ERRO: {err_text}"))
+                else:
+                    self.log_output.append_log(self.tr("[RUSTDESK] ERRO: Não foi possível obter o ID do RustDesk."))
+                return
+
+            self.log_output.append_log(self.tr(f"[RUSTDESK] ID detectado: {rust_id}"))
+
+            # Abrir RustDesk local com o ID
+            local_candidates = []
+            local_candidates.append(r"C:\PSTools\rustdesk.exe")
+            pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+            pfx86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+            local_candidates.append(os.path.join(pf, "RustDesk", "rustdesk.exe"))
+            local_candidates.append(os.path.join(pfx86, "RustDesk", "rustdesk.exe"))
+
+            local_exe = None
+            for c in local_candidates:
+                if os.path.isfile(c):
+                    local_exe = c
+                    break
+            if local_exe is None:
+                local_exe = "rustdesk.exe"
+
+            try:
+                # Sempre usar o ID detectado nesta execução
+                args = [local_exe, "--connect", rust_id]
+                subprocess.Popen(args)
+                self.log_output.append_log(self.tr(f"[RUSTDESK] Executando local: {local_exe} --connect {rust_id}"))
+                self.log_output.append_log(self.tr("[RUSTDESK] Abrindo RustDesk..."))
+            except FileNotFoundError:
+                self.log_output.append_log(self.tr("[RUSTDESK] ERRO: RustDesk não encontrado no PC local."))
+            except Exception as exc:
+                self.log_output.append_log(self.tr(f"[RUSTDESK] ERRO ao abrir RustDesk local: {exc}"))
+
+        self._rustdesk_last_path = rustdesk_remote_paths[0]
+        self.executor.outputReceived.connect(on_out)
+        self.executor.errorReceived.connect(on_err)
+        self.executor.finished.connect(on_done)
+        self.executor.run(cmd)
 
         # Conexões das abas PowerShellTab
         self.powershell_tab.noprofile_checkbox.stateChanged.connect(self.update_command)

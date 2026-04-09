@@ -87,7 +87,7 @@ Executa um comando em um **ThreadPoolExecutor** (1 worker) e emite sinais Qt par
 
 2. **`_run_command(command)`** (em thread)  
    - Detecta se o comando é Robocopy (primeiro token = robocopy) para prefixar saída com `[ROBOCOPY]`.  
-   - `subprocess.Popen(..., shell=True, stdout=PIPE, stderr=PIPE, text=True, encoding='utf-8', errors='replace')`.  
+   - `subprocess.Popen(..., shell=True, stdout=PIPE, stderr=PIPE, text=False)` e decodifica com fallback (`utf-8-sig` → `mbcs` → `cp1252`) para preservar acentuação (útil para saída de ferramentas Windows como PsExec).  
    - Lê stdout/stderr linha a linha e emite `outputReceived` / `errorReceived`.  
    - Ao terminar (`poll() is not None`), lê o restante e retorna `returncode`.  
    - Exceções emitem `errorReceived` e retornam 1.
@@ -150,7 +150,7 @@ Além disso, há uma aba de inventário **PsInfo** que é criada **sob demanda**
   - Caso contrário retorna `True`.
 
 - **`update_tab_visibility(is_msi, is_exe)`**  
-  - Remove todas as abas extras, preservando **PsExec** e (se existir) **PsInfo**.  
+  - Remove abas dinâmicas e reinsere conforme contexto, mantendo **PsInfo sempre como a última aba** quando ela existir.  
   - **MSI**: adiciona aba MSI se `is_msi`.  
   - **PowerShell**: adiciona se extensão é `ps1` ou se comando remoto é `powershell`/`powershell.exe`; em caso de arquivo .ps1, desabilita campos de comando da aba PowerShell (`set_command_fields_enabled(False)`).  
   - **CMD**: adiciona se extensão é `bat` ou se comando remoto é `cmd`/`cmd.exe`; em caso de arquivo .bat, desabilita campo de comando (`set_command_field_enabled(False)`).  
@@ -161,7 +161,11 @@ Além disso, há uma aba de inventário **PsInfo** que é criada **sob demanda**
 - **`open_psinfo_tab()`**  
   - Valida se há host preenchido (senão, loga mensagem).  
   - Se a aba PsInfo já existir, apenas foca e **re-executa** a coleta para o host atual.  
-  - Se não existir, cria `PsInfoTab`, insere na posição 1 (logo após PsExec), foca na aba e executa a coleta.
+  - Se não existir, cria `PsInfoTab`, adiciona como **última aba**, foca na aba e executa a coleta.
+
+### Encerramento da aba PsInfo ao sair
+
+- Ao trocar para qualquer outra aba, se a aba anterior era **PsInfo**, ela é removida do `QTabWidget` e destruída (`deleteLater()`), para não ficar “presa” no layout.
 
 ### Modo PsInfo (UI enxuta)
 
@@ -261,6 +265,19 @@ Tela de inventário remoto baseada no **PsInfo64.exe**.
   - **Aplicativos**: lista com busca + contador.
   - **Discos**: tabela com colunas (Volume/Tipo/Formato/Rótulo/Tamanho/Livre/% Livre).
 - **Cards colapsáveis**: os cards de resultado suportam ocultar/expandir.
+- **Loading**: durante a coleta mostra um spinner de bolinhas (`DotsSpinner`).
+
+### RustDesk (botão no Host remoto)
+
+Atalho para conectar via RustDesk sem abrir aba.
+
+- **UI**: botão “RustDesk” ao lado de Ping/ℹ️ no campo **Host remoto** (aba PsExec).
+- **Coleta de ID no remoto**: via PsExec forçando `-h -s` e executando:
+  - `"C:\Program Files\RustDesk\rustdesk.exe" --get-id`
+  - fallback automático: `"C:\Program Files (x86)\RustDesk\rustdesk.exe" --get-id`
+- **Conexão local**: abre RustDesk no PC local com:
+  - `rustdesk.exe --connect <ID_detectado>`
+- **Logs**: mensagens `[RUSTDESK] ...` no Log de Execução com erro amigável + detalhes quando aplicável.
 
 ### Aba MSI (`ui/tabs/msi.py`)
 
@@ -302,6 +319,10 @@ Tela de inventário remoto baseada no **PsInfo64.exe**.
 - Card com ícone (Unicode Segoe MDL2), título e conteúdo em grid.  
 - Funções: `make_field_label`, `add_row`, `add_row_full_width`, `grid_in_card`.  
 - **Colapsável**: `set_collapsible()` / `set_collapsed()` adiciona um toggle no header para ocultar/expandir o conteúdo do card.
+
+### Spinner (`ui/widgets/spinner.py`)
+
+- `DotsSpinner`: widget de loading com bolinhas em círculo (sem assets externos), usado no card “Coletando informações” da aba PsInfo.
 
 ### Estilo global (`ui/style.py`)
 

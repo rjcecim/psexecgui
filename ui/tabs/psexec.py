@@ -120,6 +120,7 @@ def _line_edit_with_clear_icon(password: bool = False):
 
 class PsExecTab(QWidget):
     openPsInfoRequested = pyqtSignal()
+    openRustDeskRequested = pyqtSignal()
 
     def __init__(self, parent=None, log_output=None):
         super().__init__(parent)
@@ -166,9 +167,13 @@ class PsExecTab(QWidget):
         self.ping_button.clicked.connect(self.ping_host)
         self.psinfo_button = _icon_button("\uE946", self.tr("Abrir PsInfo (inventário)"))
         self.psinfo_button.clicked.connect(self.openPsInfoRequested.emit)
+        # \uE8B7 (Copy) já usado em Robocopy; aqui usamos \uE774 (Link) como ação de conexão
+        self.rustdesk_button = _icon_button("\uE774", self.tr("Conectar via RustDesk"))
+        self.rustdesk_button.clicked.connect(self.openRustDeskRequested.emit)
         host_row.addWidget(host_clear_container)
         host_row.addWidget(self.ping_button)
         host_row.addWidget(self.psinfo_button)
+        host_row.addWidget(self.rustdesk_button)
         host_container = QWidget()
         host_container.setLayout(host_row)
         host_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)

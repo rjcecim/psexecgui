@@ -45,6 +45,7 @@ Interface moderna, preview em tempo real e abas dinâmicas conforme o tipo de ar
 | 🎨 **PyQt6** | Interface gráfica |
 | 🔧 **PsExec** | PSTools — caminho configurável (padrão: `C:\PSTools\PsExec.exe`) |
 | ℹ️ **PsInfo64** | PSTools — usado para inventário remoto (padrão: `C:\PSTools\PsInfo64.exe`) |
+| 🧩 **RustDesk** | Para “Conectar via RustDesk”: instalado no host remoto e no PC local |
 | 🌐 **Rede** | Acesso ao host remoto (SMB), credenciais se necessário |
 
 ---
@@ -94,7 +95,18 @@ O comando é aberto em um terminal externo para você acompanhar a saída.
 3. A aba **PsInfo** abre e coleta automaticamente **Sistema + Aplicativos + Discos** usando:
    - `PsInfo64.exe \\HOST -s -d -accepteula -nobanner`
 
-Na aba **PsInfo**, os cards podem ser **ocultados/expandidos** e o app **esconde** o preview do comando, o log e os botões Play/Stop/Restart (porque não se aplicam ao inventário).
+Na aba **PsInfo**, os cards podem ser **ocultados/expandidos**, há um **spinner de bolinhas** durante a coleta, e o app **esconde** o preview do comando, o log e os botões Play/Stop/Restart (porque não se aplicam ao inventário).
+
+### 🧩 Conectar via RustDesk
+
+1. ✏️ Preencha **Host remoto** na aba **PsExec**.
+2. Clique no botão **RustDesk** (ao lado do Ping/ℹ️).
+3. O app:
+   - Coleta o ID no host remoto via PsExec (forçando `-h -s`)
+   - Abre o RustDesk **no PC local** com:
+     - `rustdesk.exe --connect <ID>`
+
+O status e erros aparecem no **Log de Execução** (host inacessível, RustDesk não instalado no host/local, etc.).
 
 ---
 
@@ -110,7 +122,7 @@ Na aba **PsInfo**, os cards podem ser **ocultados/expandidos** e o app **esconde
 
 | Card | Conteúdo |
 |------|----------|
-| 🔗 **Conexão** | Caminho do PsExec, host remoto (com Ping), comando remoto (auto ou manual) |
+| 🔗 **Conexão** | Caminho do PsExec, host remoto (com Ping/ℹ️/RustDesk), comando remoto (auto ou manual) |
 | 🔐 **Autenticação** | Usuário e senha (`DOMAIN\user`) |
 | ⬆️ **Privilégios e sessão** | Elevação (-h, -s, -l), sessão interativa (-i), ID de sessão |
 | ⚡ **Desempenho** | Prioridade, grupo CPU, afinidade |
