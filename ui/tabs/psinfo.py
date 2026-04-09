@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 
 from ui.style import ICON_FONT_PT
 from ui.widgets.card import CardWidget, grid_in_card, add_row, add_row_full_width
+from ui.widgets.spinner import DotsSpinner
 from utils.psinfo import build_psinfo_target, parse_psinfo_output, format_key_values, parse_disks_table
 
 
@@ -149,6 +150,7 @@ class PsInfoTab(QWidget):
         self.log_output = log_output
         self._worker: Optional[_PsInfoWorker] = None
         self._host_source = host_source
+        self._loading_card: Optional[CardWidget] = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -187,6 +189,42 @@ class PsInfoTab(QWidget):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+        self._loading_card = None
+
+    def _set_loading(self, loading: bool, host: str = "") -> None:
+        if loading:
+            self.clear_results()
+            card = CardWidget("\uE895", self.tr("Coletando informações"))
+            card.set_collapsible(False)
+
+            wrap = QWidget()
+            lay = QVBoxLayout(wrap)
+            lay.setContentsMargins(0, 6, 0, 2)
+            lay.setSpacing(8)
+
+            msg = self.tr("Aguarde...") if not host else self.tr(f"Aguarde... ({host})")
+            lbl = QLabel(msg)
+            lbl.setStyleSheet("color: palette(windowText); opacity: 0.85;")
+
+            spinner_row = QHBoxLayout()
+            spinner_row.setContentsMargins(0, 0, 0, 0)
+            spinner_row.addStretch()
+            spinner = DotsSpinner()
+            spinner_row.addWidget(spinner)
+            spinner_row.addStretch()
+            spinner_wrap = QWidget()
+            spinner_wrap.setLayout(spinner_row)
+
+            lay.addWidget(lbl)
+            lay.addWidget(spinner_wrap)
+            card.content_layout.addWidget(wrap)
+
+            self._loading_card = card
+            self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+        else:
+            if self._loading_card is not None:
+                self._loading_card.deleteLater()
+                self._loading_card = None
 
     def _add_text_card(self, icon: str, title: str, text: str) -> None:
         card = CardWidget(icon, title)
@@ -326,7 +364,7 @@ class PsInfoTab(QWidget):
         if self._worker and self._worker.isRunning():
             return
 
-        self.clear_results()
+        self._set_loading(True, host=host)
 
         # Sem UI de checkboxes: sempre executar com tudo marcado.
         self._worker = _PsInfoWorker(
@@ -339,17 +377,20 @@ class PsInfoTab(QWidget):
         )
         self._worker.finished_ok.connect(self._on_psinfo_ok)
         self._worker.finished_err.connect(self._on_psinfo_err)
+        self._worker.finished.connect(lambda: self._set_loading(False))
         self._worker.start()
 
         if self.log_output:
             self.log_output.append_log(self.tr(f"[PSINFO] Coletando informações de {host}..."))
 
     def _on_psinfo_err(self, msg: str) -> None:
+        self._set_loading(False)
         if self.log_output:
             self.log_output.append_log(self.tr(f"[PSINFO] {msg}"))
         self._add_text_card("\uE783", self.tr("Erro"), msg)
 
     def _on_psinfo_ok(self, stdout: str) -> None:
+        self._set_loading(False)
         host = self._get_host()
         parsed = parse_psinfo_output(stdout, host=host)
 
