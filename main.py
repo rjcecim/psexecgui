@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._updating_remote_cmd = False
+        self._last_tab_widget = None
         self.setWindowTitle(self.tr("Instalador Remoto via PsExec"))
         central = QWidget()
         vbox = QVBoxLayout(central)
@@ -215,6 +216,7 @@ class MainWindow(QMainWindow):
         self.robocopy_tab_index = None
         self.update_command()
         self._update_psinfo_mode_ui()
+        self._last_tab_widget = self.tabs.currentWidget()
 
         # Conexões das abas PowerShellTab
         self.powershell_tab.noprofile_checkbox.stateChanged.connect(self.update_command)
@@ -251,15 +253,27 @@ class MainWindow(QMainWindow):
                 return
 
         self.psinfo_tab = PsInfoTab(log_output=self.log_output, host_source=self.psexec_tab.host_edit)
-        # Inserir logo após PsExec (índice 1)
-        self.tabs.insertTab(1, self.psinfo_tab, self.tr("PsInfo"))
-        self.tabs.tabBar().setTabData(1, "\uE946")  # Info
-        self.tabs.setCurrentIndex(1)
+        # PsInfo deve ser sempre a última aba
+        self.tabs.addTab(self.psinfo_tab, self.tr("PsInfo"))
+        psinfo_idx = self.tabs.indexOf(self.psinfo_tab)
+        self.tabs.tabBar().setTabData(psinfo_idx, "\uE946")  # Info
+        self.tabs.setCurrentIndex(psinfo_idx)
         self.psinfo_tab.run_psinfo()
         self._update_psinfo_mode_ui()
 
     def _on_tab_changed(self, _index: int) -> None:
+        # Se o usuário saiu da aba PsInfo, encerrá-la (remover a aba)
+        if self.psinfo_tab is not None:
+            prev = self._last_tab_widget
+            current = self.tabs.currentWidget()
+            if prev == self.psinfo_tab and current != self.psinfo_tab:
+                idx = self.tabs.indexOf(self.psinfo_tab)
+                if idx != -1:
+                    self.tabs.removeTab(idx)
+                self.psinfo_tab.deleteLater()
+                self.psinfo_tab = None
         self._update_psinfo_mode_ui()
+        self._last_tab_widget = self.tabs.currentWidget()
 
     def _update_psinfo_mode_ui(self) -> None:
         """
@@ -351,7 +365,7 @@ class MainWindow(QMainWindow):
         return True
 
     def update_tab_visibility(self, is_msi, is_exe):
-        """Atualiza a visibilidade das abas mantendo a ordem: PsExec, (PsInfo opcional), MSI, PowerShell, CMD, Robocopy"""
+        """Atualiza a visibilidade das abas mantendo a ordem: PsExec, MSI, PowerShell, CMD, Robocopy, (PsInfo opcional por último)"""
         robocopy_enabled = self.should_enable_robocopy()
         selected_file = self.file_selector.selected_file if hasattr(self.file_selector, 'selected_file') else None
         ext = selected_file.lower().split('.')[-1] if selected_file and '.' in selected_file else ''
@@ -374,28 +388,41 @@ class MainWindow(QMainWindow):
         if remote_cmd in ['cmd', 'cmd.exe']:
             show_cmd_tab = True
             cmd_by_file = False
-        # Remove todas as abas extras, preservando PsExec e (se existir) PsInfo
-        base_count = 1
-        if self.psinfo_tab is not None and self.tabs.indexOf(self.psinfo_tab) != -1:
-            base_count = 2
-        while self.tabs.count() > base_count:
-            self.tabs.removeTab(base_count)
+        # Remover abas dinâmicas, preservando PsExec e (se existir) PsInfo
+        psinfo_widget = self.psinfo_tab
+        for i in range(self.tabs.count() - 1, -1, -1):
+            w = self.tabs.widget(i)
+            if w is self.psexec_tab:
+                continue
+            if psinfo_widget is not None and w is psinfo_widget:
+                continue
+            self.tabs.removeTab(i)
+
+        # Índice onde os tabs dinâmicos serão inseridos (antes do PsInfo, se ele existir)
+        insert_at = self.tabs.count()
+        if psinfo_widget is not None:
+            idx = self.tabs.indexOf(psinfo_widget)
+            if idx != -1:
+                insert_at = idx
+
+        def _insert_tab(widget, title: str, icon_char: str) -> None:
+            nonlocal insert_at
+            self.tabs.insertTab(insert_at, widget, title)
+            self.tabs.tabBar().setTabData(insert_at, icon_char)
+            insert_at += 1
+
         # Adiciona MSI / PowerShell / CMD / Robocopy (ícone = char Unicode)
         # \uE8A5 = Package/MSI, \uE756 = PowerShell, \uE7ED = CMD/Console, \uE8B7 = Copy/Robocopy
         if is_msi:
-            self.tabs.addTab(self.msi_tab, self.tr("MSI"))
-            self.tabs.tabBar().setTabData(self.tabs.count() - 1, "\uE8A5")
+            _insert_tab(self.msi_tab, self.tr("MSI"), "\uE8A5")
         if show_powershell_tab:
-            self.tabs.addTab(self.powershell_tab, self.tr("PowerShell"))
-            self.tabs.tabBar().setTabData(self.tabs.count() - 1, "\uE756")
+            _insert_tab(self.powershell_tab, self.tr("PowerShell"), "\uE756")
             self.powershell_tab.set_command_fields_enabled(not powershell_by_file)
         if show_cmd_tab:
-            self.tabs.addTab(self.cmd_tab, self.tr("CMD"))
-            self.tabs.tabBar().setTabData(self.tabs.count() - 1, "\uE7ED")
+            _insert_tab(self.cmd_tab, self.tr("CMD"), "\uE7ED")
             self.cmd_tab.set_command_field_enabled(not cmd_by_file)
         if robocopy_enabled:
-            self.tabs.addTab(self.robocopy_tab, self.tr("Robocopy"))
-            self.tabs.tabBar().setTabData(self.tabs.count() - 1, "\uE8B7")
+            _insert_tab(self.robocopy_tab, self.tr("Robocopy"), "\uE8B7")
 
     def build_command_for_execution(self):
         """
