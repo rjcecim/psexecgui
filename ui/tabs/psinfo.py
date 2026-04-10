@@ -4,6 +4,7 @@ import os
 import subprocess
 from typing import Optional
 
+from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
@@ -171,7 +172,34 @@ class PsInfoTab(QWidget):
         if host_source is not None:
             host_source.textChanged.connect(self._on_host_changed)
 
+        self.destroyed.connect(self._abort_psinfo_worker)
+
         # Execução é disparada pelo MainWindow ao abrir/clicar no botão.
+
+    def _ui_alive(self) -> bool:
+        return not sip.isdeleted(self)
+
+    def _abort_psinfo_worker(self, _destroyed: object = None) -> None:
+        w = self._worker
+        if w is None:
+            return
+        self._worker = None
+        try:
+            w.finished_ok.disconnect(self._on_psinfo_ok)
+        except TypeError:
+            pass
+        try:
+            w.finished_err.disconnect(self._on_psinfo_err)
+        except TypeError:
+            pass
+        try:
+            w.finished.disconnect(self._on_worker_thread_finished)
+        except TypeError:
+            pass
+        if w.isRunning():
+            w.finished.connect(w.deleteLater)
+        else:
+            w.deleteLater()
 
     def _get_host(self) -> str:
         if self._host_source is None:
@@ -192,6 +220,8 @@ class PsInfoTab(QWidget):
         self._loading_card = None
 
     def _set_loading(self, loading: bool, host: str = "") -> None:
+        if not self._ui_alive():
+            return
         if loading:
             self.clear_results()
             card = CardWidget("\uE895", self.tr("Coletando informações"))
@@ -223,8 +253,10 @@ class PsInfoTab(QWidget):
             self.results_layout.insertWidget(self.results_layout.count() - 1, card)
         else:
             if self._loading_card is not None:
-                self._loading_card.deleteLater()
+                card = self._loading_card
                 self._loading_card = None
+                if not sip.isdeleted(card):
+                    card.deleteLater()
 
     def _add_text_card(self, icon: str, title: str, text: str) -> None:
         card = CardWidget(icon, title)
@@ -377,19 +409,26 @@ class PsInfoTab(QWidget):
         )
         self._worker.finished_ok.connect(self._on_psinfo_ok)
         self._worker.finished_err.connect(self._on_psinfo_err)
-        self._worker.finished.connect(lambda: self._set_loading(False))
+        self._worker.finished.connect(self._on_worker_thread_finished)
         self._worker.start()
 
         if self.log_output:
             self.log_output.append_log(self.tr(f"[PSINFO] Coletando informações de {host}..."))
 
+    def _on_worker_thread_finished(self) -> None:
+        self._set_loading(False)
+
     def _on_psinfo_err(self, msg: str) -> None:
+        if not self._ui_alive():
+            return
         self._set_loading(False)
         if self.log_output:
             self.log_output.append_log(self.tr(f"[PSINFO] {msg}"))
         self._add_text_card("\uE783", self.tr("Erro"), msg)
 
     def _on_psinfo_ok(self, stdout: str) -> None:
+        if not self._ui_alive():
+            return
         self._set_loading(False)
         host = self._get_host()
         parsed = parse_psinfo_output(stdout, host=host)
