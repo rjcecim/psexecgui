@@ -20,6 +20,7 @@ from ui.tabs.powershell import PowerShellTab
 from ui.tabs.cmd import CmdTab
 from ui.tabs.psinfo import PsInfoTab
 from ui.mica import enable_mica_for_widget
+from ui.branding import APP_DISPLAY_NAME, APP_NAME, APP_VERSION, ORG_NAME, app_icon, app_mark_pixmap
 import datetime
 
 
@@ -119,15 +120,18 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._updating_remote_cmd = False
         self._last_tab_widget = None
-        self.setWindowTitle(self.tr("Instalador Remoto via PsExec"))
+        self.setWindowTitle(APP_DISPLAY_NAME)
+        icon = app_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         central = QWidget()
         vbox = QVBoxLayout(central)
         vbox.setSpacing(0)  # Elementos bem próximos na vertical
         vbox.setContentsMargins(4, 4, 4, 4)
-        
-        # Seleção de arquivo
+
+        # Marca + título e seletor de arquivo na mesma linha
         self.file_selector = FileSelectorWidget(self)
-        vbox.addWidget(self.file_selector)
+        vbox.addWidget(self._build_brand_header())
         
         # Tabs (ícone = char Unicode em TabBar customizada)
         self.tabs = QTabWidget()
@@ -477,6 +481,42 @@ class MainWindow(QMainWindow):
         self.run_button.setVisible(not is_psinfo)
         self.stop_button.setVisible(not is_psinfo)
         self.restart_button.setVisible(not is_psinfo)
+
+    def _build_brand_header(self) -> QWidget:
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(6, 2, 6, 2)
+        lay.setSpacing(10)
+
+        mark = QLabel()
+        mark.setObjectName("brandMark")
+        pm = app_mark_pixmap(28)
+        if not pm.isNull():
+            mark.setPixmap(pm)
+        mark.setFixedSize(28, 28)
+        mark.setScaledContents(False)
+
+        title = QLabel(APP_DISPLAY_NAME)
+        title.setObjectName("brandTitle")
+        title_font = QFont(title.font())
+        title_font.setPointSize(11)
+        title_font.setWeight(QFont.Weight.DemiBold)
+        title.setFont(title_font)
+
+        subtitle = QLabel(self.tr("Instalação e comandos remotos via PsExec"))
+        subtitle.setObjectName("brandSubtitle")
+        subtitle.setStyleSheet("color: palette(mid);")
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(0)
+        text_col.addWidget(title)
+        text_col.addWidget(subtitle)
+
+        lay.addWidget(mark, alignment=Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(text_col, stretch=0)
+        lay.addWidget(self.file_selector, stretch=1)
+        return row
 
     def _apply_initial_geometry(self):
         """
@@ -881,7 +921,13 @@ if __name__ == "__main__":
     # Padrão global de densidade/tamanho dos widgets (sutil)
     from ui.style import apply_ui_defaults
     apply_ui_defaults(app)
-    QCoreApplication.setApplicationName("Instalador Remoto PsExec")
+    QCoreApplication.setOrganizationName(ORG_NAME)
+    QCoreApplication.setApplicationName(APP_NAME)
+    QCoreApplication.setApplicationVersion(APP_VERSION)
+    app.setApplicationDisplayName(APP_DISPLAY_NAME)
+    icon = app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     window = MainWindow()
     # Tenta habilitar efeito Mica / backdrop do Windows 11
     enable_mica_for_widget(window)

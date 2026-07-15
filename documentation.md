@@ -1,6 +1,46 @@
-# Documentação técnica — PSExecGUI v4
+# Documentação técnica — PSExecGUI 1.5.0
 
-Lógicas completas de **Backend** (montagem e execução de comandos) e **Frontend** (interface, abas, sinais e estado).
+Lógicas de **backend** (montagem e execução de comandos) e **frontend** (interface, branding, abas, sinais e estado).
+
+**Versão:** `1.5.0` (`APP_VERSION` em `ui/branding.py`)  
+**Nome exibido:** Instalador Remoto via PsExec (`APP_DISPLAY_NAME`)
+
+---
+
+# Parte 0 — Identidade e empacotamento
+
+## 0.1 Branding (`ui/branding.py`)
+
+Centraliza metadados e resolução de assets (desenvolvimento e PyInstaller):
+
+| Constante / API | Função |
+|-----------------|--------|
+| `APP_NAME` | `"PSExecGUI"` — nome interno / `QCoreApplication` |
+| `APP_DISPLAY_NAME` | Título da janela e cabeçalho |
+| `APP_VERSION` | `"1.5.0"` |
+| `ORG_NAME` | Organização Qt |
+| `app_icon()` | Preferência `assets/icon.ico`; fallback `assets/app_icon.png` |
+| `app_mark_pixmap(size)` | Carrega `assets/app_mark.png` escalado (cabeçalho) |
+| `assets_dir()` / `asset_path()` | `_MEIPASS/assets` quando frozen; senão pasta do repositório |
+
+Paleta de referência: `BRAND_NAVY`, `BRAND_AZURE`, `BRAND_CYAN`.
+
+## 0.2 Assets (`assets/`)
+
+| Arquivo | Uso |
+|---------|-----|
+| `icon.ico` | Ícone do `.exe` (PyInstaller `icon=`) e da janela |
+| `app_icon.png` | Fallback de ícone; master para regenerar ICO |
+| `app_mark.png` | Marca visual no cabeçalho da UI |
+
+Script auxiliar: `scripts/generate_brand_assets.py` — reexporta o ICO a partir de `app_icon.png`.
+
+## 0.3 Spec PyInstaller (`PSExecGUI.spec`)
+
+- `console=False` (só janela).
+- `name='PSExecGUI'` → `dist/PSExecGUI.exe`.
+- `icon='assets/icon.ico'`.
+- `datas=[('assets', 'assets')]` — embute os três assets no executável.
 
 ---
 
@@ -41,77 +81,59 @@ Classe responsável por montar as strings de comando **Robocopy**, **PsExec** e 
   - Sem `psexec_params`: retorna texto de placeholder.  
   - **Comando manual**: se não há `file_path` nem `folder_path` mas há `remote_cmd`, monta `_base_psexec_cmd()` + `remote_cmd` (+ extra_args).  
   - Sem arquivo: retorna placeholder.  
-  - **Pasta**: `_build_psexec_folder()` — usa caminho remoto após Robocopy (C:\dest\folder_name\relpath), trata .ps1, .bat, .msi ou genérico.  
+  - **Pasta**: `_build_psexec_folder()` — usa caminho remoto após Robocopy (`C:\dest\folder_name\relpath`), trata .ps1, .bat, .msi ou genérico.  
   - Por extensão:  
-    - `.exe` → `_build_psexec_exe()` (nome ou caminho com -c/-f).  
-    - `.msi` → `_build_psexec_msi()` (chama `build_msiexec()` e encadeia no PsExec).  
-    - `.ps1` → `_build_psexec_ps_script()` (powershell com parâmetros da aba PowerShell; caminho local ou remoto se Robocopy).  
-    - `.bat` → `_build_psexec_bat_script()` (cmd com parâmetros da aba CMD; idem para caminho).  
-    - Outros → `_build_psexec_other()`.
+    - `.exe` → `_build_psexec_exe()`  
+    - `.msi` → `_build_psexec_msi()`  
+    - `.ps1` → `_build_psexec_ps_script()`  
+    - `.bat` → `_build_psexec_bat_script()`  
+    - Outros → `_build_psexec_other()`
 
 - **`_base_psexec_cmd()`**  
   Monta lista: `[psexec_path ou "PsExec.exe", "\\\\host", "-u user", "-p password", flags de elevação, -i [session_id], prioridade, -a affinity, -g group, -n timeout, -d, -e, -c, -f, -v, -accepteula, -nobanner]`.  
-  Se `robocopy_params` está definido, **não** adiciona -c nem -f (cópia é feita pelo Robocopy).
+  Se `robocopy_params` está definido, **não** adiciona -c nem -f (cópia via Robocopy).
 
 - **`build_msiexec()`**  
-  Só roda se `msi_params['enable']` e há `file_path`. Exige destino (Robocopy). Monta `msiexec [ação] "C:\dest\file.msi" [interface] [restart] [log] [repair] [update]` e extrai valores de combo via `_extract_flag_value()`.
+  Só roda se `msi_params['enable']` e há `file_path`. Exige destino (Robocopy). Monta `msiexec ...` e extrai valores de combo via `_extract_flag_value()`.
 
 - **`build_full_command()`**  
   - Chama `build_robocopy()`.  
   - Para `.ps1` usa `_build_psexec_ps_script()`, para `.bat` usa `_build_psexec_bat_script()`, senão `build_psexec()`.  
-  - Se há comando Robocopy, retorna `robocopy_cmd + "\n" + psexec_cmd`; senão só `psexec_cmd`.
+  - Se há Robocopy, retorna `robocopy_cmd + "\n" + psexec_cmd`; senão só `psexec_cmd`.
 
 ### Regras de negócio importantes
 
-- Destino Robocopy: relativo ao C: do remoto; normalizado (sem C:, barras unificadas).  
-- Caminho remoto para script: `C:\dest\file_name` (arquivo) ou `C:\dest\folder_name\relpath` (pasta).  
-- Prioridade na aba PowerShell/CMD: EncodedCommand > Command > File (ou caminho do script).  
-- Flags -c e -f são desabilitadas na UI para .msi, .ps1, .bat; e não são adicionadas pelo builder quando Robocopy está ativo.
+- Destino Robocopy: relativo ao C: do remoto; normalizado.  
+- Caminho remoto para script: `C:\dest\file_name` ou `C:\dest\folder_name\relpath`.  
+- Prioridade PowerShell/CMD: EncodedCommand > Command > File.  
+- Flags -c e -f desabilitadas na UI para .msi/.ps1/.bat; omitidas no builder quando Robocopy está ativo.
 
 ---
 
 ## 1.2 Executor (`core/executor.py`)
 
-Executa um comando em um **ThreadPoolExecutor** (1 worker) e emite sinais Qt para saída padrão, erro e término.
+Executa um comando em um **ThreadPoolExecutor** (1 worker) e emite sinais Qt.
 
 ### Sinais
 
 - `outputReceived(str)`: linha de stdout.
 - `errorReceived(str)`: linha de stderr.
-- `finished(int)`: código de saída do processo.
+- `finished(int)`: código de saída.
 
 ### Fluxo
 
-1. **`run(command)`**  
-   Chama `stop()` para cancelar execução anterior, guarda `command`, submete `_run_command(command)` ao executor e agenda `_check_future()` com `QTimer.singleShot(100, ...)`.
-
-2. **`_run_command(command)`** (em thread)  
-   - Detecta se o comando é Robocopy (primeiro token = robocopy) para prefixar saída com `[ROBOCOPY]`.  
-   - `subprocess.Popen(..., shell=True, stdout=PIPE, stderr=PIPE, text=False)` e decodifica com fallback (`utf-8-sig` → `mbcs` → `cp1252`) para preservar acentuação (útil para saída de ferramentas Windows como PsExec).  
-   - Lê stdout/stderr linha a linha e emite `outputReceived` / `errorReceived`.  
-   - Ao terminar (`poll() is not None`), lê o restante e retorna `returncode`.  
-   - Exceções emitem `errorReceived` e retornam 1.
-
-3. **`_check_future()`**  
-   Se `future.done()`, obtém resultado (exit code), emite `finished(exit_code)` e limpa `future`. Senão, re-agenda com `QTimer.singleShot(100, _check_future)`.
-
-4. **`stop()`**  
-   Termina o processo (se existir), limpa referência e cancela o `future`.
+1. **`run(command)`** — cancela execução anterior, submete `_run_command` e agenda `_check_future()` via `QTimer`.
+2. **`_run_command(command)`** (thread) — `Popen` com decodificação (`utf-8-sig` → `mbcs` → `cp1252`); prefixa `[ROBOCOPY]` quando aplicável.
+3. **`_check_future()`** — emite `finished` quando a future termina; senão reagenda.
+4. **`stop()`** — termina o processo e cancela a future.
 
 ---
 
 ## 1.3 Utilitários
 
-- **`utils/api.py`**  
-  Usa `kernel32` (ctypes) para: `get_processor_groups()`, `get_processor_count(group_id)`, `get_all_processor_info()`. Usado na aba PsExec para grupo CPU e afinidade.
-
-- **`utils/psinfo.py`**  
-  Parser do output do **PsInfo64.exe** (Sysinternals) para inventário remoto:
-  - `parse_psinfo_output(text)`: extrai **Sistema** (chave/valor), **Aplicativos** (`-s`) e **tabela de discos** (`-d`).
-  - `parse_disks_table(disks_raw)`: converte a tabela de volumes do `PsInfo -d` em linhas estruturadas (para exibir em tabela na UI).
-
-- **`utils/validator.py`**  
-  `AffinityValidator`: valida valor de afinidade CPU (ex.: "1,2,3") conforme número máximo de CPUs do grupo selecionado.
+- **`utils/api.py`** — grupos/contagem de processadores (`kernel32`), usados na aba PsExec (afinidade/grupo).
+- **`utils/psinfo.py`** — parser do PsInfo64 (`parse_psinfo_output`, `parse_disks_table`).
+- **`utils/validator.py`** — `AffinityValidator` para afinidade CPU.
 
 ---
 
@@ -119,118 +141,57 @@ Executa um comando em um **ThreadPoolExecutor** (1 worker) e emite sinais Qt par
 
 ## 2.1 MainWindow (`main.py`)
 
-Janela principal: barra de seleção de arquivo/pasta, **QTabWidget** (PsExec + abas condicionais), preview do comando, botões Executar/Parar/Reiniciar e área de log.
+Janela principal: **cabeçalho de marca + seletor na mesma linha**, `QTabWidget` (PsExec + abas condicionais), preview, botões Executar/Parar/Reiniciar e log.
 
-Além disso, há uma aba de inventário **PsInfo** que é criada **sob demanda** (não aparece no startup).
+Metadados Qt (`setApplicationName`, `setApplicationVersion`, ícone) vêm de `ui.branding`.
+
+### Cabeçalho (`_build_brand_header`)
+
+Uma única linha horizontal:
+
+1. `app_mark.png` (28×28) via `app_mark_pixmap(28)`
+2. Coluna de texto: título (`APP_DISPLAY_NAME`) + subtítulo
+3. `FileSelectorWidget` (stretch) — status do arquivo + botões arquivo/pasta/ajuda
 
 ### Inicialização
 
-- Cria **FileSelectorWidget**, **PsExecTab**, **MsiTab**, **RobocopyTab**, **PowerShellTab**, **CmdTab**, **CommandPreviewWidget**, **LogOutputWidget**.  
-- Adiciona só a aba PsExec; MSI, PowerShell, CMD e Robocopy são adicionadas/removidas dinamicamente.  
-- **PsInfo**: a aba não é criada no `__init__`; ela é criada e inserida quando o usuário solicita (botão ℹ️ na aba PsExec).  
-- Instancia **CommandBuilder** e **Executor**.  
-- Conecta todos os sinais dos widgets a `update_command`, `on_file_selected`, `on_run`, `on_stop`, `on_restart`, `on_remote_cmd_edit_changed`, e sinais do executor ao log e `on_process_finished`.  
-- Chama `update_command()` uma vez no fim do `__init__`.  
-- Opcional: **Mica** (Windows 11) via `enable_mica_for_widget(window)`.  
-- stdout/stderr e `sys.excepthook` são redirecionados para o log interno.
+- Cria FileSelector, abas (PsExec sempre; MSI/PowerShell/CMD/Robocopy dinâmicas), preview, log.
+- **PsInfo** criada sob demanda (botão ℹ️).
+- Instancia `CommandBuilder` e `Executor`.
+- Conecta sinais; `update_command()` no fim do `__init__`.
+- Opcional: Mica (`enable_mica_for_widget`).
+- stdout/stderr e `excepthook` redirecionados ao log.
 
 ### Seleção de arquivo/pasta
 
-- **`on_file_selected(selection)`**  
-  - `selection`: `{'mode': 'file'|'folder', 'file': path, 'folder': path ou None}`.  
-  - Chama `command_builder.set_file_selection(selection)`.  
-  - Para extensão `msi`, `ps1`, `bat`: desmarca e desabilita flags -c e -f na aba PsExec.  
-  - Chama `update_tab_visibility(is_msi, is_exe)` e `update_command()`.
+- **`on_file_selected(selection)`** — atualiza builder, desabilita -c/-f para msi/ps1/bat, chama `update_tab_visibility` e `update_command`.
 
 ### Visibilidade das abas
 
-- **`should_enable_robocopy()`**  
-  - Retorna `False` se não há arquivo selecionado ou se a extensão é `.exe`.  
-  - Se o comando remoto estiver preenchido e for diferente de "Comando gerado automaticamente", e não for só `cmd`/`cmd.exe` ou `powershell`/`powershell.exe`, retorna `False` (comando manual desativa Robocopy).  
-  - Caso contrário retorna `True`.
+- **`should_enable_robocopy()`** — falso para `.exe` ou comando remoto manual (exceto cmd/powershell puros).
+- **`update_tab_visibility`** — reinsere MSI / PowerShell / CMD / Robocopy; PsInfo permanece última aba quando existir.
 
-- **`update_tab_visibility(is_msi, is_exe)`**  
-  - Remove abas dinâmicas e reinsere conforme contexto, mantendo **PsInfo sempre como a última aba** quando ela existir.  
-  - **MSI**: adiciona aba MSI se `is_msi`.  
-  - **PowerShell**: adiciona se extensão é `ps1` ou se comando remoto é `powershell`/`powershell.exe`; em caso de arquivo .ps1, desabilita campos de comando da aba PowerShell (`set_command_fields_enabled(False)`).  
-  - **CMD**: adiciona se extensão é `bat` ou se comando remoto é `cmd`/`cmd.exe`; em caso de arquivo .bat, desabilita campo de comando (`set_command_field_enabled(False)`).  
-  - **Robocopy**: adiciona se `should_enable_robocopy()`.
+### PsInfo
 
-### Abertura da aba PsInfo (sob demanda)
+- **`open_psinfo_tab()`** — exige host; cria ou foca aba e dispara coleta.
+- Ao sair da aba PsInfo, ela é removida (`deleteLater()`).
+- **`_update_psinfo_mode_ui()`** — em modo PsInfo, oculta preview, log e Play/Stop/Restart.
 
-- **`open_psinfo_tab()`**  
-  - Valida se há host preenchido (senão, loga mensagem).  
-  - Se a aba PsInfo já existir, apenas foca e **re-executa** a coleta para o host atual.  
-  - Se não existir, cria `PsInfoTab`, adiciona como **última aba**, foca na aba e executa a coleta.
+### Montagem do comando
 
-### Encerramento da aba PsInfo ao sair
-
-- Ao trocar para qualquer outra aba, se a aba anterior era **PsInfo**, ela é removida do `QTabWidget` e destruída (`deleteLater()`), para não ficar “presa” no layout.
-
-### Modo PsInfo (UI enxuta)
-
-- **`_update_psinfo_mode_ui()`**  
-  Quando a aba atual é **PsInfo**, oculta elementos que não se aplicam ao inventário:
-  - Preview do comando (`CommandPreviewWidget`)
-  - Log de Execução (`LogOutputWidget`)
-  - Botões Play/Stop/Restart
-
-### Montagem do comando para preview e execução
-
-- **`build_command_for_execution()`**  
-  Define qual método do CommandBuilder usar:
-
-  - Com **arquivo selecionado**:  
-    - Se `should_enable_robocopy()`: `build_full_command()` (Robocopy + PsExec).  
-    - Se `.bat` e aba atual é CMD: `_build_psexec_bat_script()`.  
-    - Se `.ps1`: `_build_psexec_ps_script()`.  
-    - Caso contrário: `build_psexec()`.  
-  - Sem arquivo (comando manual):  
-    - Se comando remoto é `powershell`/`powershell.exe`: `_build_psexec_ps_script()`.  
-    - Se é `cmd`/`cmd.exe`: `_build_psexec_bat_script()`.  
-    - Se aba atual é CMD: `_build_psexec_bat_script()`.  
-    - Se aba atual é PowerShell: `_build_psexec_ps_script()`.  
-    - Senão: `build_psexec()`.
-
-### Atualização do preview
-
-- **`update_command()`**  
-  - Monta `msi_params` da aba MSI e chama `set_msi_params`.  
-  - Obtém seleção do FileSelector (file, folder, mode) e `robocopy_enabled`.  
-  - Sempre chama `set_powershell_params(powershell_tab.get_params())` e `set_cmd_params(cmd_tab.get_params())`.  
-  - **Com arquivo/pasta**:  
-    - `set_file_selection(file_selection)`.  
-    - Coloca comando remoto em somente leitura com texto "Comando gerado automaticamente".  
-    - Monta `psexec_params` a partir da aba PsExec, `robocopy_params` da aba Robocopy (se habilitado), chama `set_psexec_params` e `set_robocopy_params`.  
-  - **Sem arquivo**: libera comando remoto para edição e monta só `psexec_params`.  
-  - Chama `build_command_for_execution()` e `command_preview.set_command(command)`.
+- **`build_command_for_execution()`** — escolhe `build_full_command`, builders de script ou `build_psexec` conforme arquivo/comando/aba.
+- **`update_command()`** — sincroniza params das abas no builder e atualiza o preview.
 
 ### Execução
 
-- **`on_run()`**  
-  - Obtém comando com `build_command_for_execution()`.  
-  - Limpa o log, desabilita Executar e habilita Parar.  
-  - Escreve comando no log e em `exec_history.log`.  
-  - Se o comando contém `\n`: divide em duas linhas (robocopy_cmd e psexec_cmd); executa robocopy via `executor.run(robocopy_cmd)` e, no sinal `finished`, se exit code 0, executa PsExec com `subprocess.Popen('start cmd /k ' + psexec_cmd, shell=True)`.  
-  - Se não contém `\n`: executa só PsExec com `subprocess.Popen('start cmd /k ' + psexec_cmd, shell=True)`.  
-  - Reabilita Executar e desabilita Parar.
-
-- **`on_stop()`**  
-  Chama `executor.stop()` e ajusta botões.
-
-- **`on_process_finished(exit_code)`**  
-  Reabilita Executar, desabilita Parar e registra código no log.
-
-- **`on_remote_cmd_edit_changed(text)`**  
-  Atualiza visibilidade das abas e chama `update_command()`; habilita/desabilita botões de arquivo/pasta do selector conforme o texto do comando remoto.
+- **`on_run()`** — log + `exec_history.log`; se houver `\n`, roda Robocopy via Executor e PsExec em `cmd /k`; senão só PsExec externo.
+- **`on_stop()`** / **`on_process_finished()`** — controlam botões e log.
+- **`on_remote_cmd_edit_changed`** — recalcula abas e estado do seletor.
 
 ### Geometria e encerramento
 
-- **`_apply_initial_geometry()`**  
-  Ajusta tamanho da janela com base em `sizeHint()` e geometria da tela (min/max), e centraliza.
-
-- **`closeEvent`**  
-  Chama `executor.stop()` e, se existir, `executor.executor.shutdown(wait=False)`.
+- **`_apply_initial_geometry()`** — sizeHint + limites da tela, centraliza.
+- **`closeEvent`** — `executor.stop()` e shutdown do pool se existir.
 
 ---
 
@@ -238,115 +199,59 @@ Além disso, há uma aba de inventário **PsInfo** que é criada **sob demanda**
 
 ### FileSelectorWidget (`ui/widgets/selector.py`)
 
-- Sinais: `fileSelected` (dict com mode, file, folder).  
-- Botões: arquivo, pasta, ajuda (executa arquivo com `/?`).  
-- Atualiza ícone e rótulo conforme seleção; emite `fileSelected` ao escolher arquivo ou pasta.
+- Sinal: `fileSelected` (mode, file, folder).
+- Botões: arquivo, pasta, ajuda (`/?`).
+- Ícone do arquivo só aparece após seleção; rótulo expande (`stretch`).
 
 ### Aba PsExec (`ui/tabs/psexec.py`)
 
-- **Cards**: Conexão, Autenticação, Privilégios e Sessão, Desempenho, Flags e Argumentos.  
-- Helper **`_line_edit_with_clear_icon()`**: retorna um container (QWidget com borda) contendo QLineEdit + QToolButton (ícone X). O botão aparece quando há texto e, ao clicar, limpa o campo. Usado em: PsExec path (não), Host, Comando remoto, Usuário, Senha, Args extras.  
-- Host: container com clear + botão Ping (abre cmd com `ping -n 4 -w 1000 <host>`).  
-- Host: botão **ℹ️ PsInfo** ao lado do Ping emite um sinal (`openPsInfoRequested`) para a janela principal abrir a aba de inventário.
-- Autenticação: usuário e senha (QLineEdit com clear).  
-- Desempenho: prioridade, grupo CPU (via `utils.api`), afinidade (com `AffinityValidator`).  
-- Flags: checkboxes para -d, -e, -c, -f, -v, -accepteula, -nobanner; timeout; args extras (com clear).
+- Cards: Conexão, Autenticação, Privilégios e Sessão, Desempenho, Flags e Argumentos.
+- Clear icon em Host, Comando remoto, Usuário, Senha, Args extras.
+- Host: Ping + PsInfo (`openPsInfoRequested`) + RustDesk (`openRustDeskRequested`).
 
 ### Aba PsInfo (`ui/tabs/psinfo.py`)
 
-Tela de inventário remoto baseada no **PsInfo64.exe**.
+- Coleta: `PsInfo64.exe \\HOST -s -d -accepteula -nobanner`.
+- Cards Sistema / Aplicativos / Discos; colapsáveis; `DotsSpinner` durante loading.
 
-- **Criação**: criada sob demanda (quando o usuário clica no botão ℹ️ ao lado do Ping).  
-- **Execução**: ao abrir (ou ao clicar novamente), executa automaticamente:
-  - `PsInfo64.exe \\HOST -s -d -accepteula -nobanner`
-- **Decodificação**: captura stdout/stderr em bytes e decodifica com fallback (`utf-8-sig` → `mbcs` → `cp1252`) para preservar acentuação (PT-BR).  
-- **UI (cards)**:
-  - **Sistema**: grade chave/valor alinhada.
-  - **Aplicativos**: lista com busca + contador.
-  - **Discos**: tabela com colunas (Volume/Tipo/Formato/Rótulo/Tamanho/Livre/% Livre).
-- **Cards colapsáveis**: os cards de resultado suportam ocultar/expandir.
-- **Loading**: durante a coleta mostra um spinner de bolinhas (`DotsSpinner`).
+### RustDesk
 
-### RustDesk (botão no Host remoto)
+- ID remoto via PsExec (`-h -s`) em `Program Files` / `(x86)`.
+- Local: `rustdesk.exe --connect <ID>`.
+- Logs `[RUSTDESK] ...`.
 
-Atalho para conectar via RustDesk sem abrir aba.
+### Demais abas
 
-- **UI**: botão “RustDesk” ao lado de Ping/ℹ️ no campo **Host remoto** (aba PsExec).
-- **Coleta de ID no remoto**: via PsExec forçando `-h -s` e executando:
-  - `"C:\Program Files\RustDesk\rustdesk.exe" --get-id`
-  - fallback automático: `"C:\Program Files (x86)\RustDesk\rustdesk.exe" --get-id`
-- **Conexão local**: abre RustDesk no PC local com:
-  - `rustdesk.exe --connect <ID_detectado>`
-- **Logs**: mensagens `[RUSTDESK] ...` no Log de Execução com erro amigável + detalhes quando aplicável.
+- **MSI** — ação, interface, restart, log, repair, update.
+- **Robocopy** — destino + switches.
+- **PowerShell** / **CMD** — flags e comando; campos desabilitados quando o comando vem do arquivo.
 
-### Aba MSI (`ui/tabs/msi.py`)
+### Widgets de suporte
 
-- Combos: ação (/i, /x, etc.), interface (/quiet, /passive, etc.), política de reinício.  
-- Log: checkbox e campo de caminho do arquivo de log.  
-- Repair e Update: campos de texto.  
-- Usa `grid_in_card` e `add_row` do `ui/widgets/card.py`.
-
-### Aba Robocopy (`ui/tabs/robocopy.py`)
-
-- Campo de destino (relativo ao C:).  
-- Checkboxes para switches: /NFL, /NDL, /NJH, /NJS, /nc, /ns, /np.  
-- `get_params()` retorna `{'dest': ..., 'switches': "..."}`.
-
-### Aba PowerShell (`ui/tabs/powershell.py`)
-
-- Opções: -NoProfile, -NoExit, -ExecutionPolicy, -WindowStyle.  
-- Comando: -Command e -EncodedCommand.  
-- `set_command_fields_enabled(enabled)`: habilita/desabilita campos de comando (desabilitado quando o comando é gerado a partir de arquivo .ps1).  
-- `get_params()` retorna dicionário com todas as opções e comandos.
-
-### Aba CMD (`ui/tabs/cmd.py`)
-
-- Opções: /C, /K, /Q, /D, /S.  
-- Campo de comando.  
-- `set_command_field_enabled(enabled)` e `get_params()` análogos à aba PowerShell.
-
-### CommandPreviewWidget (`ui/widgets/preview.py`)
-
-- QPlainTextEdit somente leitura, fonte monoespaçada.  
-- `set_command(text)` atualiza o texto exibido.
-
-### LogOutputWidget (`ui/widgets/log.py`)
-
-- Área de log (ex.: QPlainTextEdit) com `append_log(text)` e `clear_log()`.
-
-### CardWidget (`ui/widgets/card.py`)
-
-- Card com ícone (Unicode Segoe MDL2), título e conteúdo em grid.  
-- Funções: `make_field_label`, `add_row`, `add_row_full_width`, `grid_in_card`.  
-- **Colapsável**: `set_collapsible()` / `set_collapsed()` adiciona um toggle no header para ocultar/expandir o conteúdo do card.
-
-### Spinner (`ui/widgets/spinner.py`)
-
-- `DotsSpinner`: widget de loading com bolinhas em círculo (sem assets externos), usado no card “Coletando informações” da aba PsInfo.
-
-### Estilo global (`ui/style.py`)
-
-- **apply_ui_defaults(app)**: define fonte (Segoe UI), min-height para QLineEdit/QComboBox/QSpinBox/QCheckBox, bordas e padding para QLineEdit, estilos para QTabBar, etc.
-
-### Mica (`ui/mica.py`)
-
-- **enable_mica_for_widget(widget)**: em Windows 11 (build >= 22000), aplica efeito Mica/backdrop na janela via WinAPI (ctypes). Falha em silêncio em Windows 10 ou em erro.
+- **CommandPreviewWidget** — monoespaçado, somente leitura.
+- **LogOutputWidget** — `append_log` / `clear_log`.
+- **CardWidget** — ícone MDL2, título, grid; colapsável.
+- **DotsSpinner** — loading sem assets externos.
+- **style.py** — `apply_ui_defaults` (Segoe UI, densidades).
+- **mica.py** — backdrop Windows 11.
 
 ---
 
 ## 2.3 TabBar customizada (`main.py`)
 
-- **`_Mdl2TabBar`**: desenha ícone (char em Segoe MDL2 Assets) + texto em cada aba; ícone armazenado em `tabData(index)`. Abas com tamanho baseado no conteúdo (`setExpanding(False)`).
+- **`_Mdl2TabBar`**: ícone Unicode (Segoe MDL2 Assets) + texto; `tabData(index)`; `setExpanding(False)`.
 
 ---
 
 ## 2.4 Fluxo de dados resumido
 
-1. Usuário seleciona arquivo/pasta ou edita campos → **FileSelector** ou widgets das abas emitem mudanças.  
-2. **MainWindow** reage com `on_file_selected` ou `update_command` (conectado a vários sinais).  
-3. **update_command** lê todos os parâmetros das abas, chama **CommandBuilder** (set_*) e depois **build_command_for_execution()**.  
-4. Resultado é passado para **CommandPreviewWidget** e fica disponível para **on_run**.  
-5. **on_run** usa o mesmo **build_command_for_execution()**, grava no log e executa via **Executor** (robocopy) e/ou **subprocess** (PsExec em cmd externo).  
-6. **Executor** emite **outputReceived** / **errorReceived** / **finished** → log e botões são atualizados.
+1. Usuário seleciona arquivo/pasta ou edita campos → sinais dos widgets.
+2. MainWindow reage com `on_file_selected` ou `update_command`.
+3. `update_command` preenche o CommandBuilder e chama `build_command_for_execution()`.
+4. Resultado vai ao preview e fica disponível para `on_run`.
+5. `on_run` executa via Executor (Robocopy) e/ou subprocess (`cmd /k` para PsExec).
+6. Sinais do Executor atualizam log e botões.
 
-Isso encerra a documentação das lógicas de Backend e Frontend do PSExecGUI v4.
+---
+
+Fim da documentação técnica do **PSExecGUI 1.5.0**.

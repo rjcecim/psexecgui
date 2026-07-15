@@ -68,11 +68,12 @@ class FileSelectorWidget(QWidget):
         self.help_button.clicked.connect(self.show_help)
 
         self.layout_widget.addWidget(self.icon_label)
-        self.layout_widget.addWidget(self.name_label)
+        self.layout_widget.addWidget(self.name_label, 1)
         self.layout_widget.addWidget(self.file_button)
         self.layout_widget.addWidget(self.folder_button)
         self.layout_widget.addWidget(self.help_button)
         self.setLayout(self.layout_widget)
+        self.icon_label.hide()  # só aparece quando há arquivo selecionado
 
     def _create_open_menu(self):
         # Não é mais necessário, mas mantido para compatibilidade se chamado em outro lugar
@@ -126,6 +127,7 @@ class FileSelectorWidget(QWidget):
             icon = icon_provider.icon(file_info)
         pixmap = icon.pixmap(32, 32)
         self.icon_label.setPixmap(pixmap)
+        self.icon_label.show()
 
         # Habilitar botão de ajuda apenas se for arquivo .exe
         is_exe = file_path.lower().endswith('.exe')
