@@ -211,6 +211,20 @@ class MainWindow(QMainWindow):
         self.robocopy_tab.dest_edit.textChanged.connect(self.update_command)
         for cb in self.robocopy_tab.switches:
             cb.stateChanged.connect(self.update_command)
+        # Conexões da aba PowerShell
+        self.powershell_tab.noprofile_checkbox.stateChanged.connect(self.update_command)
+        self.powershell_tab.noexit_checkbox.stateChanged.connect(self.update_command)
+        self.powershell_tab.execpol_combo.currentTextChanged.connect(self.update_command)
+        self.powershell_tab.winstyle_combo.currentTextChanged.connect(self.update_command)
+        self.powershell_tab.command_edit.textChanged.connect(self.update_command)
+        self.powershell_tab.encoded_edit.textChanged.connect(self.update_command)
+        # Conexões da aba CMD
+        self.cmd_tab.c_checkbox.stateChanged.connect(self.update_command)
+        self.cmd_tab.k_checkbox.stateChanged.connect(self.update_command)
+        self.cmd_tab.q_checkbox.stateChanged.connect(self.update_command)
+        self.cmd_tab.d_checkbox.stateChanged.connect(self.update_command)
+        self.cmd_tab.s_checkbox.stateChanged.connect(self.update_command)
+        self.cmd_tab.command_edit.textChanged.connect(self.update_command)
         self.psexec_tab.remote_cmd_edit.textChanged.connect(self.on_remote_cmd_edit_changed)
         self.run_button.clicked.connect(self.on_run)
         self.stop_button.clicked.connect(self.on_stop)
@@ -414,21 +428,6 @@ class MainWindow(QMainWindow):
         self.executor.finished.connect(on_done)
         self.executor.run(cmd)
 
-        # Conexões das abas PowerShellTab
-        self.powershell_tab.noprofile_checkbox.stateChanged.connect(self.update_command)
-        self.powershell_tab.noexit_checkbox.stateChanged.connect(self.update_command)
-        self.powershell_tab.execpol_combo.currentTextChanged.connect(self.update_command)
-        self.powershell_tab.winstyle_combo.currentTextChanged.connect(self.update_command)
-        self.powershell_tab.command_edit.textChanged.connect(self.update_command)
-        self.powershell_tab.encoded_edit.textChanged.connect(self.update_command)
-        # Conexões das abas CmdTab
-        self.cmd_tab.c_checkbox.stateChanged.connect(self.update_command)
-        self.cmd_tab.k_checkbox.stateChanged.connect(self.update_command)
-        self.cmd_tab.q_checkbox.stateChanged.connect(self.update_command)
-        self.cmd_tab.d_checkbox.stateChanged.connect(self.update_command)
-        self.cmd_tab.s_checkbox.stateChanged.connect(self.update_command)
-        self.cmd_tab.command_edit.textChanged.connect(self.update_command)
-
     def open_psinfo_tab(self) -> None:
         """
         Cria a aba PsInfo sob demanda e foca nela.
@@ -470,6 +469,8 @@ class MainWindow(QMainWindow):
                 self.psinfo_tab = None
         self._update_psinfo_mode_ui()
         self._last_tab_widget = self.tabs.currentWidget()
+        # Aba PowerShell/CMD ativa muda o método de montagem do comando
+        self.update_command()
 
     def _update_psinfo_mode_ui(self) -> None:
         """
@@ -831,6 +832,8 @@ class MainWindow(QMainWindow):
             f.write(f"[{timestamp}] {text}\n")
 
     def on_run(self):
+        # Garante que os params das abas (PowerShell/CMD/etc.) estejam sincronizados
+        self.update_command()
         full_command = self.build_command_for_execution()
         self.log_output.clear_log()
         self.run_button.setEnabled(False)
