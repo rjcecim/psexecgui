@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import winreg
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -34,6 +35,107 @@ def _strip_host(host: str) -> str:
 def build_psinfo_target(host: str) -> str:
     h = _strip_host(host)
     return f"\\\\{h}" if h else ""
+
+
+_UNINSTALL_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+
+
+def _apps_from_uninstall(root, access: int) -> Dict[str, str]:
+    """
+    Retorna {DisplayName: linha no estilo PsInfo}.
+    Formato PsInfo: "Nome Versão" (quando DisplayVersion existe).
+    """
+    apps: Dict[str, str] = {}
+    try:
+        uninstall = winreg.OpenKey(root, _UNINSTALL_KEY, 0, access)
+    except OSError:
+        return apps
+    try:
+        i = 0
+        while True:
+            try:
+                sub_name = winreg.EnumKey(uninstall, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                with winreg.OpenKey(uninstall, sub_name) as sub:
+                    try:
+                        value, _ = winreg.QueryValueEx(sub, "DisplayName")
+                    except OSError:
+                        continue
+                    name = str(value or "").strip()
+                    if not name:
+                        continue
+                    version = ""
+                    try:
+                        ver_val, _ = winreg.QueryValueEx(sub, "DisplayVersion")
+                        version = str(ver_val or "").strip()
+                    except OSError:
+                        pass
+                    line = f"{name} {version}".strip() if version else name
+                    # Preferir entrada com versão se houver colisão de DisplayName.
+                    prev = apps.get(name)
+                    if prev is None or (version and prev == name):
+                        apps[name] = line
+            except OSError:
+                continue
+    finally:
+        uninstall.Close()
+    return apps
+
+
+def list_remote_installed_apps(host: str) -> List[str]:
+    """
+    Lista aplicativos instalados no host via Remote Registry (HKLM Uninstall),
+    unindo as views 64-bit e 32-bit (Wow6432Node).
+
+    Formato alinhado ao PsInfo -s: "DisplayName DisplayVersion".
+    O PsInfo64 -s costuma enxergar só a view nativa 64-bit; por isso o inventário
+    do card Aplicativos usa esta coleta complementar.
+    """
+    h = _strip_host(host)
+    if not h:
+        return []
+
+    try:
+        root = winreg.ConnectRegistry(rf"\\{h}", winreg.HKEY_LOCAL_MACHINE)
+    except OSError:
+        return []
+
+    try:
+        apps_64 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+        apps_32 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_32KEY)
+    finally:
+        root.Close()
+
+    names_64 = set(apps_64)
+    names_32 = set(apps_32)
+    only_64 = names_64 - names_32
+    only_32 = names_32 - names_64
+    both = names_64 & names_32
+
+    out: List[str] = []
+    for n in only_64:
+        out.append(apps_64[n])
+    for n in only_32:
+        out.append(apps_32[n])
+    for n in both:
+        # Mesmo DisplayName nas duas views: manter as duas linhas (com versão).
+        line_64 = apps_64[n]
+        line_32 = apps_32[n]
+        # Se a linha já não indica arquitetura, acrescenta sufixo no nome.
+        if "(64-bit)" not in line_64.casefold() and "(32-bit)" not in line_64.casefold():
+            name_part = n
+            ver_part = line_64[len(n) :].strip()
+            line_64 = f"{name_part} (64-bit) {ver_part}".strip()
+        if "(64-bit)" not in line_32.casefold() and "(32-bit)" not in line_32.casefold():
+            name_part = n
+            ver_part = line_32[len(n) :].strip()
+            line_32 = f"{name_part} (32-bit) {ver_part}".strip()
+        out.append(line_64)
+        out.append(line_32)
+    return sorted(set(out), key=str.casefold)
 
 
 def parse_psinfo_output(text: str, host: str = "") -> PsInfoResult:

@@ -30,7 +30,13 @@ from PyQt6.QtWidgets import (
 from ui.style import ICON_FONT_PT
 from ui.widgets.card import CardWidget, grid_in_card, add_row, add_row_full_width
 from ui.widgets.spinner import DotsSpinner
-from utils.psinfo import build_psinfo_target, parse_psinfo_output, format_key_values, parse_disks_table
+from utils.psinfo import (
+    build_psinfo_target,
+    parse_psinfo_output,
+    format_key_values,
+    parse_disks_table,
+    list_remote_installed_apps,
+)
 
 
 def _icon_button(icon_char: str, tooltip: str = "", size: int = 32) -> QPushButton:
@@ -58,7 +64,7 @@ def _icon_button(icon_char: str, tooltip: str = "", size: int = 32) -> QPushButt
 
 
 class _PsInfoWorker(QThread):
-    finished_ok = pyqtSignal(str)  # stdout
+    finished_ok = pyqtSignal(str, object)  # stdout, apps override (list[str] | None)
     finished_err = pyqtSignal(str)  # erro amigável
 
     def __init__(self, exe_path: str, host: str, include_apps: bool, include_disks: bool, accepteula: bool, nobanner: bool):
@@ -137,8 +143,18 @@ class _PsInfoWorker(QThread):
                 if not out:
                     return
 
+            # PsInfo64 -s costuma omitir apps 32-bit; complementa via Remote Registry (64+32).
+            apps_override = None
+            if self.include_apps:
+                try:
+                    remote_apps = list_remote_installed_apps(self.host)
+                    if remote_apps:
+                        apps_override = remote_apps
+                except Exception:
+                    apps_override = None
+
             # Mesmo com returncode != 0, o PsInfo às vezes escreve dados úteis em stdout.
-            self.finished_ok.emit(out if out else err)
+            self.finished_ok.emit(out if out else err, apps_override)
         except FileNotFoundError:
             self.finished_err.emit("Não foi possível encontrar o PsInfo64.exe. Ajuste o caminho na aba PsInfo.")
         except Exception as exc:
@@ -426,12 +442,14 @@ class PsInfoTab(QWidget):
             self.log_output.append_log(self.tr(f"[PSINFO] {msg}"))
         self._add_text_card("\uE783", self.tr("Erro"), msg)
 
-    def _on_psinfo_ok(self, stdout: str) -> None:
+    def _on_psinfo_ok(self, stdout: str, apps_override=None) -> None:
         if not self._ui_alive():
             return
         self._set_loading(False)
         host = self._get_host()
         parsed = parse_psinfo_output(stdout, host=host)
+        if apps_override:
+            parsed.applications = list(apps_override)
 
         # Card Sistema (pares chave/valor)
         order = [
