@@ -2,10 +2,13 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy,
     QGridLayout, QToolButton,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QPalette
 
 from ui.style import FONT_UI, SIZE_UI, CARD_GRID_VERTICAL_SPACING
+
+# Limite padrão do Qt para "sem máximo"
+_QWIDGETSIZE_MAX = 16777215
 
 
 def make_field_label(text: str) -> QLabel:
@@ -47,11 +50,17 @@ class CardWidget(QWidget):
     linha divisória e área de conteúdo em grid.
     """
 
+    collapsedChanged = pyqtSignal(bool)
+    downloadRequested = pyqtSignal()
+
     def __init__(self, icon_char: str, title: str, parent=None):
         super().__init__(parent)
         self._setup_style()
         self._is_collapsible = False
         self._is_collapsed = False
+        self._wants_expanding = False
+        self._layout_stretch = 1
+        self._divider_spacing_idx: int | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -60,14 +69,14 @@ class CardWidget(QWidget):
         # Container interno com fundo e bordas arredondadas via stylesheet
         self._container = QWidget()
         self._container.setObjectName("cardContainer")
-        container_layout = QVBoxLayout(self._container)
-        container_layout.setContentsMargins(8, 4, 8, 5)
-        container_layout.setSpacing(0)
+        self._container_layout = QVBoxLayout(self._container)
+        self._container_layout.setContentsMargins(8, 4, 8, 5)
+        self._container_layout.setSpacing(0)
 
         # Cabeçalho (altura fixa para todos os cards ficarem iguais)
-        header_widget = QWidget()
-        header_widget.setFixedHeight(22)
-        header = QHBoxLayout(header_widget)
+        self._header_widget = QWidget()
+        self._header_widget.setFixedHeight(22)
+        header = QHBoxLayout(self._header_widget)
         header.setSpacing(6)
         header.setContentsMargins(0, 0, 0, 0)
 
@@ -87,6 +96,18 @@ class CardWidget(QWidget):
         self._title_label.setWordWrap(False)
         self._title_label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
 
+        self._download_btn = QToolButton()
+        self._download_btn.setObjectName("cardDownload")
+        self._download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._download_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._download_btn.setAutoRaise(True)
+        self._download_btn.setFixedSize(22, 22)
+        self._download_btn.setFont(QFont("Segoe MDL2 Assets", 10))
+        self._download_btn.setText("\uE896")  # Download
+        self._download_btn.setToolTip("Baixar informações deste card")
+        self._download_btn.clicked.connect(self.downloadRequested.emit)
+        self._download_btn.hide()
+
         self._toggle_btn = QToolButton()
         self._toggle_btn.setObjectName("cardToggle")
         self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -99,25 +120,27 @@ class CardWidget(QWidget):
 
         header.addWidget(self._icon_label)
         header.addWidget(self._title_label)
-        header.addWidget(self._toggle_btn)
         header.addStretch()
+        header.addWidget(self._download_btn)
+        header.addWidget(self._toggle_btn)
 
-        container_layout.addWidget(header_widget)
+        self._container_layout.addWidget(self._header_widget)
 
         # Linha divisória
         self._divider = QFrame()
         self._divider.setFrameShape(QFrame.Shape.HLine)
         self._divider.setObjectName("cardDivider")
         self._divider.setFixedHeight(1)
-        container_layout.addWidget(self._divider)
-        container_layout.addSpacing(2)
+        self._container_layout.addWidget(self._divider)
+        self._container_layout.addSpacing(2)
+        self._divider_spacing_idx = self._container_layout.count() - 1
 
         # Área de conteúdo — o chamador adiciona widgets aqui
         self._content_widget = QWidget()
         self.content_layout = QVBoxLayout(self._content_widget)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(CARD_GRID_VERTICAL_SPACING)
-        container_layout.addWidget(self._content_widget)
+        self._container_layout.addWidget(self._content_widget)
 
         outer.addWidget(self._container)
 
@@ -127,23 +150,113 @@ class CardWidget(QWidget):
         if self._is_collapsible:
             self.set_collapsed(bool(collapsed))
 
+    def set_downloadable(self, downloadable: bool = True) -> None:
+        self._download_btn.setVisible(bool(downloadable))
+
+    def set_expanding(self, expanding: bool = True) -> None:
+        """Faz o card (e a área de conteúdo) ocupar o espaço vertical restante."""
+        self._wants_expanding = bool(expanding)
+        if self._is_collapsed:
+            return
+        v_policy = QSizePolicy.Policy.Expanding if expanding else QSizePolicy.Policy.Preferred
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, v_policy)
+        self._container.setSizePolicy(QSizePolicy.Policy.Expanding, v_policy)
+        self._content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, v_policy)
+        self._container_layout.setStretchFactor(self._content_widget, 1 if expanding else 0)
+
+    def set_layout_stretch(self, stretch: int) -> None:
+        """Guarda o stretch no layout pai (usado ao expandir de novo após minimizar)."""
+        self._layout_stretch = max(0, int(stretch))
+
+    @property
+    def layout_stretch(self) -> int:
+        return self._layout_stretch
+
+    @property
+    def is_collapsed(self) -> bool:
+        return bool(self._is_collapsed)
+
     def set_collapsed(self, collapsed: bool) -> None:
         self._is_collapsed = bool(collapsed)
         if not self._is_collapsible:
             self._content_widget.setVisible(True)
             self._divider.setVisible(True)
+            self._set_divider_spacing_visible(True)
             self._toggle_btn.hide()
             return
+
         self._content_widget.setVisible(not self._is_collapsed)
         self._divider.setVisible(not self._is_collapsed)
+        self._set_divider_spacing_visible(not self._is_collapsed)
         # \uE70D = ChevronDown, \uE70E = ChevronUp
         self._toggle_btn.setText("\uE70E" if self._is_collapsed else "\uE70D")
         self._toggle_btn.setToolTip("Expandir" if self._is_collapsed else "Ocultar")
+
+        if self._is_collapsed:
+            # Só o cabeçalho no topo; o stretch final do layout pai absorve o resto
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+            self._container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+            self._content_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+            self._container_layout.setStretchFactor(self._content_widget, 0)
+            m = self._container_layout.contentsMargins()
+            h = self._header_widget.height() + m.top() + m.bottom() + 2
+            self.setFixedHeight(h)
+            self._apply_parent_stretch(0)
+        else:
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(_QWIDGETSIZE_MAX)
+            # Libera altura fixa
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            if self._wants_expanding:
+                self.set_expanding(True)
+            else:
+                self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+                self._container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self._apply_parent_stretch(self._layout_stretch)
+
+        self.updateGeometry()
+        parent = self.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().activate()
+            parent.updateGeometry()
+        self.collapsedChanged.emit(self._is_collapsed)
 
     def toggle_collapsed(self) -> None:
         if not self._is_collapsible:
             return
         self.set_collapsed(not self._is_collapsed)
+
+    def _set_divider_spacing_visible(self, visible: bool) -> None:
+        idx = self._divider_spacing_idx
+        if idx is None:
+            return
+        item = self._container_layout.itemAt(idx)
+        if item is not None and item.spacerItem() is not None:
+            # spacer não tem setVisible; altura 0 / 2 via changeSize
+            sp = item.spacerItem()
+            if visible:
+                sp.changeSize(0, 2, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+            else:
+                sp.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+            self._container_layout.invalidate()
+
+    def _apply_parent_stretch(self, stretch: int) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        lay = parent.layout()
+        if lay is None:
+            return
+        idx = lay.indexOf(self)
+        if idx < 0:
+            return
+        # Se ainda não gravamos o stretch (ex.: addWidget depois de set_expanding),
+        # captura o atual antes de zerar.
+        if stretch == 0 and self._layout_stretch <= 0:
+            current = lay.stretch(idx)
+            if current > 0:
+                self._layout_stretch = current
+        lay.setStretch(idx, stretch)
 
     def _setup_style(self):
         self.setStyleSheet("""
@@ -168,6 +281,15 @@ class CardWidget(QWidget):
                 background: palette(light);
                 border-radius: 4px;
                 opacity: 1.0;
+            }
+            QToolButton#cardDownload {
+                border: none;
+                background: transparent;
+                color: palette(highlight);
+            }
+            QToolButton#cardDownload:hover {
+                background: palette(light);
+                border-radius: 4px;
             }
             QFrame#cardDivider {
                 color: palette(mid);

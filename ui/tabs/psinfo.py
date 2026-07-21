@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import csv
+import datetime
 import os
 import subprocess
-from typing import Optional
+from typing import Any, List, Optional, Union
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -19,19 +21,23 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QScrollArea,
+    QFrame,
     QGridLayout,
-    QListWidget,
-    QListWidgetItem,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
+    QToolButton,
+    QAbstractItemView,
 )
 
 from ui.style import ICON_FONT_PT
-from ui.widgets.card import CardWidget, grid_in_card, add_row, add_row_full_width
+from ui.widgets.card import CardWidget, grid_in_card, add_row, add_row_full_width, make_field_label
 from ui.widgets.spinner import DotsSpinner
 from utils.psinfo import (
+    InstalledApp,
     build_psinfo_target,
+    build_uninstall_remote_cmd,
+    describe_uninstall,
     parse_psinfo_output,
     format_key_values,
     parse_disks_table,
@@ -64,7 +70,7 @@ def _icon_button(icon_char: str, tooltip: str = "", size: int = 32) -> QPushButt
 
 
 class _PsInfoWorker(QThread):
-    finished_ok = pyqtSignal(str, object)  # stdout, apps override (list[str] | None)
+    finished_ok = pyqtSignal(str, object)  # stdout, apps override (list[InstalledApp] | None)
     finished_err = pyqtSignal(str)  # erro amigável
 
     def __init__(self, exe_path: str, host: str, include_apps: bool, include_disks: bool, accepteula: bool, nobanner: bool):
@@ -162,28 +168,40 @@ class _PsInfoWorker(QThread):
 
 
 class PsInfoTab(QWidget):
+    # remote_cmd, rótulo do app (para log)
+    uninstallRequested = pyqtSignal(str, str)
+
     def __init__(self, parent=None, log_output=None, host_source: Optional[QLineEdit] = None):
         super().__init__(parent)
         self.log_output = log_output
         self._worker: Optional[_PsInfoWorker] = None
         self._host_source = host_source
         self._loading_card: Optional[CardWidget] = None
+        self._apps_extra_params: Optional[QLineEdit] = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(3)
 
-        # Área de resultados (cards) com rolagem
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(self.scroll.frameShape().NoFrame)
+        # Barra da pesquisa completa: renovar inventário
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(8)
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("color: palette(windowText); opacity: 0.75;")
+        self.refresh_btn = _icon_button("\uE72C", self.tr("Renovar (buscar informações novamente)"), size=28)
+        self.refresh_btn.clicked.connect(self.run_psinfo)
+        toolbar.addWidget(self._status_lbl, 1)
+        toolbar.addWidget(self.refresh_btn, 0, Qt.AlignmentFlag.AlignRight)
+        root.addLayout(toolbar)
+
+        # Área dos cards (sem scrollbar externo)
         self.results_root = QWidget()
         self.results_layout = QVBoxLayout(self.results_root)
         self.results_layout.setContentsMargins(0, 0, 0, 0)
         self.results_layout.setSpacing(3)
-        self.results_layout.addStretch()
-        self.scroll.setWidget(self.results_root)
-        root.addWidget(self.scroll)
+        self.results_layout.addStretch(1)
+        root.addWidget(self.results_root, 1)
 
         if host_source is not None:
             host_source.textChanged.connect(self._on_host_changed)
@@ -194,6 +212,60 @@ class PsInfoTab(QWidget):
 
     def _ui_alive(self) -> bool:
         return not sip.isdeleted(self)
+
+    def _add_result_card(self, card: CardWidget, stretch: int = 1) -> None:
+        """Insere o card antes do stretch final e registra o stretch para restaurar ao expandir."""
+        card.set_layout_stretch(stretch)
+        layout_stretch = 0 if card.is_collapsed else stretch
+        idx = max(0, self.results_layout.count() - 1)
+        self.results_layout.insertWidget(idx, card, layout_stretch)
+        try:
+            card.collapsedChanged.disconnect(self._redistribute_card_space)
+        except TypeError:
+            pass
+        card.collapsedChanged.connect(lambda _collapsed=False: self._redistribute_card_space())
+        self._redistribute_card_space()
+
+    def _iter_result_cards(self):
+        for i in range(self.results_layout.count()):
+            item = self.results_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if isinstance(w, CardWidget):
+                yield w
+
+    def _redistribute_card_space(self) -> None:
+        """
+        Com algum card expandido: eles preenchem a janela (stretch final = 0).
+        Com todos minimizados: só cabeçalhos no topo (stretch final = 1).
+        """
+        if self.results_layout.count() == 0:
+            return
+
+        cards = list(self._iter_result_cards())
+        expanded = [c for c in cards if not c.is_collapsed]
+        last = self.results_layout.count() - 1
+
+        if not expanded:
+            # Todos minimizados → cabeçalhos no topo + espaço vazio embaixo
+            for c in cards:
+                idx = self.results_layout.indexOf(c)
+                if idx >= 0:
+                    self.results_layout.setStretch(idx, 0)
+            self.results_layout.setStretch(last, 1)
+        else:
+            # Há card(s) aberto(s) → preenchem a janela inteira
+            self.results_layout.setStretch(last, 0)
+            for c in cards:
+                idx = self.results_layout.indexOf(c)
+                if idx < 0:
+                    continue
+                if c.is_collapsed:
+                    self.results_layout.setStretch(idx, 0)
+                else:
+                    self.results_layout.setStretch(idx, max(1, c.layout_stretch))
+
+        self.results_layout.activate()
+        self.updateGeometry()
 
     def _abort_psinfo_worker(self, _destroyed: object = None) -> None:
         w = self._worker
@@ -227,21 +299,28 @@ class PsInfoTab(QWidget):
         return
 
     def clear_results(self) -> None:
-        # Remove tudo menos o stretch final
-        while self.results_layout.count() > 1:
+        while self.results_layout.count():
             item = self.results_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+        self.results_layout.addStretch(1)
         self._loading_card = None
+        self._apps_extra_params = None
 
     def _set_loading(self, loading: bool, host: str = "") -> None:
         if not self._ui_alive():
             return
+        self.refresh_btn.setEnabled(not loading)
         if loading:
             self.clear_results()
+            host_disp = host or self._get_host()
+            self._status_lbl.setText(
+                self.tr(f"Coletando inventário de {host_disp}...") if host_disp else self.tr("Coletando inventário...")
+            )
             card = CardWidget("\uE895", self.tr("Coletando informações"))
             card.set_collapsible(False)
+            card.set_expanding(True)
 
             wrap = QWidget()
             lay = QVBoxLayout(wrap)
@@ -261,12 +340,14 @@ class PsInfoTab(QWidget):
             spinner_wrap = QWidget()
             spinner_wrap.setLayout(spinner_row)
 
-            lay.addWidget(lbl)
+            lay.addStretch(1)
+            lay.addWidget(lbl, 0, Qt.AlignmentFlag.AlignHCenter)
             lay.addWidget(spinner_wrap)
-            card.content_layout.addWidget(wrap)
+            lay.addStretch(1)
+            card.content_layout.addWidget(wrap, 1)
 
             self._loading_card = card
-            self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+            self._add_result_card(card, 1)
         else:
             if self._loading_card is not None:
                 card = self._loading_card
@@ -277,17 +358,20 @@ class PsInfoTab(QWidget):
     def _add_text_card(self, icon: str, title: str, text: str) -> None:
         card = CardWidget(icon, title)
         card.set_collapsible(True, collapsed=False)
+        card.set_expanding(True)
         editor = QPlainTextEdit()
         editor.setReadOnly(True)
         editor.setPlainText(text or "")
         editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         editor.setStyleSheet("QPlainTextEdit { border: 1px solid palette(mid); border-radius: 4px; }")
-        card.content_layout.addWidget(editor)
-        self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+        editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        card.content_layout.addWidget(editor, 1)
+        self._add_result_card(card, 1)
 
     def _add_system_card(self, icon: str, title: str, kv: list[tuple[str, str]]) -> None:
         card = CardWidget(icon, title)
         card.set_collapsible(True, collapsed=False)
+        card.set_expanding(True)
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(14)
@@ -309,10 +393,17 @@ class PsInfoTab(QWidget):
 
         wrap = QWidget()
         wrap.setLayout(grid)
-        card.content_layout.addWidget(wrap)
-        self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+        inner = QScrollArea()
+        inner.setWidgetResizable(True)
+        inner.setFrameShape(QFrame.Shape.NoFrame)
+        inner.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner.setWidget(wrap)
+        inner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        card.content_layout.addWidget(inner, 1)
+        self._wire_card_download(card, "sistema", list(kv))
+        self._add_result_card(card, 2)
 
-    def _add_apps_card(self, icon: str, title: str, apps: list[str]) -> None:
+    def _add_apps_card(self, icon: str, title: str, apps: List[Union[InstalledApp, str]]) -> None:
         card = CardWidget(icon, title)
         card.set_collapsible(True, collapsed=False)
 
@@ -328,20 +419,120 @@ class PsInfoTab(QWidget):
         top.addWidget(search)
         top.addWidget(count_lbl)
 
-        lst = QListWidget()
-        lst.setStyleSheet("QListWidget { border: 1px solid palette(mid); border-radius: 4px; }")
+        normalized: List[Union[InstalledApp, str]] = []
+        for a in apps:
+            if isinstance(a, InstalledApp):
+                if a.display_name.strip() or a.display_line.strip():
+                    normalized.append(a)
+            elif a and str(a).strip():
+                normalized.append(str(a).strip())
 
-        normalized = [a.strip() for a in apps if a and a.strip()]
-        for a in normalized:
-            QListWidgetItem(a, lst)
+        table = QTableWidget()
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels([self.tr("Nome"), self.tr("Versão"), self.tr("Tipo"), ""])
+        table.setRowCount(len(normalized))
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setShowGrid(False)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(3, 36)
+        table.setStyleSheet(
+            """
+            QTableWidget { border: 1px solid palette(mid); border-radius: 4px; }
+            QTableWidget::item { padding: 4px 6px; }
+            """
+        )
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        table.setMinimumHeight(80)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        trash_buttons: list = []
+
+        for row, app in enumerate(normalized):
+            if isinstance(app, InstalledApp):
+                name = app.display_name or app.display_line
+                version = app.version or ""
+                kind = "MSI" if (app.is_msi and app.product_code) else "EXE"
+                try:
+                    build_uninstall_remote_cmd(app, "")
+                    can_uninstall = True
+                except ValueError:
+                    can_uninstall = False
+            else:
+                name = str(app)
+                version = ""
+                kind = ""
+                can_uninstall = False
+
+            name_item = QTableWidgetItem(name)
+            name_item.setData(Qt.ItemDataRole.UserRole, app if isinstance(app, InstalledApp) else None)
+            version_item = QTableWidgetItem(version)
+            kind_item = QTableWidgetItem(kind)
+            kind_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, 0, name_item)
+            table.setItem(row, 1, version_item)
+            table.setItem(row, 2, kind_item)
+
+            trash = QToolButton()
+            trash.setText("\uE74D")  # Delete
+            trash.setFont(QFont("Segoe MDL2 Assets", 11))
+            trash.setCursor(Qt.CursorShape.PointingHandCursor)
+            trash.setAutoRaise(True)
+            trash.setFixedSize(26, 26)
+            trash.setStyleSheet(
+                """
+                QToolButton {
+                    border: none;
+                    background: transparent;
+                    color: palette(windowText);
+                }
+                QToolButton:hover {
+                    background: palette(light);
+                    border-radius: 4px;
+                    color: #c42b1c;
+                }
+                QToolButton:disabled { color: palette(mid); }
+                """
+            )
+            if can_uninstall and isinstance(app, InstalledApp):
+                trash.setToolTip(describe_uninstall(app, ""))
+                trash._installed_app = app  # type: ignore[attr-defined]
+                trash_buttons.append(trash)
+                trash.clicked.connect(lambda _checked=False, a=app: self._on_uninstall_clicked(a))
+            else:
+                trash.setEnabled(False)
+                trash.setToolTip(self.tr("Desinstalação indisponível (sem UninstallString)"))
+
+            cell = QWidget()
+            cell_lay = QHBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cell_lay.addWidget(trash)
+            table.setCellWidget(row, 3, cell)
 
         def update_filter():
             q = (search.text() or "").strip().lower()
             visible = 0
-            for i in range(lst.count()):
-                item = lst.item(i)
-                ok = (q in item.text().lower()) if q else True
-                item.setHidden(not ok)
+            for r in range(table.rowCount()):
+                name_it = table.item(r, 0)
+                ver_it = table.item(r, 1)
+                kind_it = table.item(r, 2)
+                text = (
+                    f"{name_it.text() if name_it else ''} "
+                    f"{ver_it.text() if ver_it else ''} "
+                    f"{kind_it.text() if kind_it else ''}"
+                ).lower()
+                ok = (q in text) if q else True
+                table.setRowHidden(r, not ok)
                 if ok:
                     visible += 1
             count_lbl.setText(self.tr(f"{visible}/{len(normalized)}"))
@@ -351,10 +542,130 @@ class PsInfoTab(QWidget):
 
         top_wrap = QWidget()
         top_wrap.setLayout(top)
-        card.content_layout.addWidget(top_wrap)
-        card.content_layout.addWidget(lst)
+        card.set_expanding(True)
+        card.content_layout.addWidget(top_wrap, 0)
+        card.content_layout.addWidget(table, 1)
 
-        self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+        extras_row = QHBoxLayout()
+        extras_row.setContentsMargins(0, 4, 0, 0)
+        extras_row.setSpacing(10)
+        extras_lbl = make_field_label(self.tr("Parametros Extras"))
+        extras_edit = QLineEdit()
+        extras_edit.setPlaceholderText(
+            self.tr("EXE: ex. /S (WinRAR). MSI: ex. REBOOT=ReallySuppress")
+        )
+        extras_edit.setToolTip(
+            self.tr(
+                "Anexado ao comando padrão de cada app.\n"
+                "EXE: switches do fabricante (WinRAR: /S).\n"
+                "MSI: adicionais além de /qn /norestart."
+            )
+        )
+        extras_row.addWidget(extras_lbl)
+        extras_row.addWidget(extras_edit, 1)
+        extras_wrap = QWidget()
+        extras_wrap.setLayout(extras_row)
+        card.content_layout.addWidget(extras_wrap, 0)
+        self._apps_extra_params = extras_edit
+
+        def refresh_trash_tooltips():
+            extras_now = (extras_edit.text() or "").strip()
+            for btn in trash_buttons:
+                app_obj = getattr(btn, "_installed_app", None)
+                if isinstance(app_obj, InstalledApp):
+                    btn.setToolTip(describe_uninstall(app_obj, extras_now))
+
+        extras_edit.textChanged.connect(lambda _t: refresh_trash_tooltips())
+
+        self._wire_card_download(card, "aplicativos", list(normalized))
+        self._add_result_card(card, 3)
+
+
+    def _on_uninstall_clicked(self, app: InstalledApp) -> None:
+        if not self._ui_alive():
+            return
+        host = self._get_host()
+        if not host:
+            if self.log_output:
+                self.log_output.append_log(self.tr("[PSINFO] Host remoto não informado."))
+            return
+
+        extras = ""
+        if self._apps_extra_params is not None and not sip.isdeleted(self._apps_extra_params):
+            extras = (self._apps_extra_params.text() or "").strip()
+
+        try:
+            remote_cmd = build_uninstall_remote_cmd(app, extras)
+        except ValueError as exc:
+            if self.log_output:
+                self.log_output.append_log(self.tr(f"[PSINFO] {exc}"))
+            return
+
+        self.uninstallRequested.emit(remote_cmd, app.display_line)
+
+    def _wire_card_download(self, card: CardWidget, kind: str, payload: Any) -> None:
+        card.set_downloadable(True)
+        card.downloadRequested.connect(lambda k=kind, p=payload: self._download_card_data(k, p))
+
+    def _download_card_data(self, kind: str, payload: Any) -> None:
+        host = (self._get_host() or "host").strip().strip("\\") or "host"
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_host = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in host)
+
+        if kind == "sistema":
+            default_name = f"psinfo_{safe_host}_sistema_{stamp}.txt"
+            filt = self.tr("Texto (*.txt)")
+            path, _ = QFileDialog.getSaveFileName(self, self.tr("Salvar Sistema"), default_name, filt)
+            if not path:
+                return
+            lines = [f"Host: {host}", f"Gerado: {stamp}", ""]
+            for k, v in payload or []:
+                lines.append(f"{k}: {v}")
+            text = "\n".join(lines) + "\n"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        elif kind == "aplicativos":
+            default_name = f"psinfo_{safe_host}_aplicativos_{stamp}.csv"
+            filt = self.tr("CSV (*.csv)")
+            path, _ = QFileDialog.getSaveFileName(self, self.tr("Salvar Aplicativos"), default_name, filt)
+            if not path:
+                return
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f, delimiter=";")
+                w.writerow(["Nome", "Versao", "Tipo", "ProductCode", "UninstallString"])
+                for app in payload or []:
+                    if isinstance(app, InstalledApp):
+                        kind_app = "MSI" if (app.is_msi and app.product_code) else "EXE"
+                        w.writerow(
+                            [
+                                app.display_name,
+                                app.version,
+                                kind_app,
+                                app.product_code,
+                                app.uninstall_string or app.quiet_uninstall_string,
+                            ]
+                        )
+                    else:
+                        w.writerow([str(app), "", "", "", ""])
+        elif kind == "discos":
+            default_name = f"psinfo_{safe_host}_discos_{stamp}.csv"
+            filt = self.tr("CSV (*.csv)")
+            path, _ = QFileDialog.getSaveFileName(self, self.tr("Salvar Discos"), default_name, filt)
+            if not path:
+                return
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f, delimiter=";")
+                w.writerow(["Volume", "Tipo", "Formato", "Rotulo", "Tamanho", "Livre", "PctLivre"])
+                for row in payload or []:
+                    w.writerow(
+                        [row.volume, row.type, row.format, row.label, row.size, row.free, row.free_pct]
+                    )
+        else:
+            return
+
+        if self.log_output:
+            self.log_output.append_log(self.tr(f"[PSINFO] Arquivo salvo: {path}"))
+        self._status_lbl.setText(self.tr(f"Arquivo salvo: {os.path.basename(path)}"))
 
     def _add_disks_card(self, icon: str, title: str, disks_raw: list[str]) -> None:
         rows = parse_disks_table(disks_raw)
@@ -399,8 +710,16 @@ class PsInfoTab(QWidget):
                 it = QTableWidgetItem(val)
                 table.setItem(r, c, it)
 
-        card.content_layout.addWidget(table)
-        self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+        # Ocupa fatia da tela; rolagem só se houver muitos volumes
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        table.setMinimumHeight(56)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        card.set_expanding(True)
+        card.content_layout.addWidget(table, 1)
+        self._wire_card_download(card, "discos", list(rows))
+        self._add_result_card(card, 1)
 
     def run_psinfo(self) -> None:
         host = self._get_host()
@@ -440,6 +759,7 @@ class PsInfoTab(QWidget):
         self._set_loading(False)
         if self.log_output:
             self.log_output.append_log(self.tr(f"[PSINFO] {msg}"))
+        self._status_lbl.setText(self.tr("Falha na coleta"))
         self._add_text_card("\uE783", self.tr("Erro"), msg)
 
     def _on_psinfo_ok(self, stdout: str, apps_override=None) -> None:
@@ -448,8 +768,6 @@ class PsInfoTab(QWidget):
         self._set_loading(False)
         host = self._get_host()
         parsed = parse_psinfo_output(stdout, host=host)
-        if apps_override:
-            parsed.applications = list(apps_override)
 
         # Card Sistema (pares chave/valor)
         order = [
@@ -475,8 +793,10 @@ class PsInfoTab(QWidget):
         else:
             self._add_text_card("\uE8FE", self.tr("Sistema"), self.tr("Nenhuma informação de sistema foi detectada no output."))
 
-        # Card Aplicativos
-        if parsed.applications:
+        # Card Aplicativos (preferir lista rica do Remote Registry)
+        if apps_override:
+            self._add_apps_card("\uE71D", self.tr("Aplicativos"), list(apps_override))
+        elif parsed.applications:
             self._add_apps_card("\uE71D", self.tr("Aplicativos"), parsed.applications)
 
         # Card Discos
@@ -485,4 +805,5 @@ class PsInfoTab(QWidget):
 
         if self.log_output:
             self.log_output.append_log(self.tr(f"[PSINFO] Coleta finalizada para {host}."))
+        self._status_lbl.setText(self.tr(f"Inventário de {host}") if host else self.tr("Inventário atualizado"))
 

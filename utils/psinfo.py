@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import shlex
 import winreg
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -26,6 +28,22 @@ class PsInfoDiskRow:
     free_pct: str
 
 
+@dataclass
+class InstalledApp:
+    display_name: str
+    version: str
+    display_line: str
+    product_code: str
+    uninstall_string: str
+    quiet_uninstall_string: str
+    is_msi: bool
+    arch: str  # "64" | "32"
+
+
+_GUID_RE = re.compile(r"\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}")
+_UNINSTALL_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+
+
 def _strip_host(host: str) -> str:
     h = (host or "").strip()
     # Aceita entrada como "\\\\HOST" ou "HOST"
@@ -37,15 +55,31 @@ def build_psinfo_target(host: str) -> str:
     return f"\\\\{h}" if h else ""
 
 
-_UNINSTALL_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+def _reg_str(sub, value_name: str) -> str:
+    try:
+        value, _ = winreg.QueryValueEx(sub, value_name)
+        text = str(value or "").strip()
+        # Remove nulos/controles que quebram cmd/Qt
+        return "".join(ch for ch in text if ch >= " " or ch in "\t")
+    except OSError:
+        return ""
 
 
-def _apps_from_uninstall(root, access: int) -> Dict[str, str]:
-    """
-    Retorna {DisplayName: linha no estilo PsInfo}.
-    Formato PsInfo: "Nome Versão" (quando DisplayVersion existe).
-    """
-    apps: Dict[str, str] = {}
+def _detect_msi(sub_key: str, uninstall_string: str) -> tuple[bool, str]:
+    key = (sub_key or "").strip()
+    if _GUID_RE.fullmatch(key):
+        return True, key
+    us = uninstall_string or ""
+    if "msiexec" in us.lower():
+        m = _GUID_RE.search(us)
+        if m:
+            return True, m.group(0)
+    return False, ""
+
+
+def _apps_from_uninstall(root, access: int, arch: str) -> Dict[str, InstalledApp]:
+    """Retorna {DisplayName: InstalledApp} para a view indicada."""
+    apps: Dict[str, InstalledApp] = {}
     try:
         uninstall = winreg.OpenKey(root, _UNINSTALL_KEY, 0, access)
     except OSError:
@@ -60,24 +94,27 @@ def _apps_from_uninstall(root, access: int) -> Dict[str, str]:
             i += 1
             try:
                 with winreg.OpenKey(uninstall, sub_name) as sub:
-                    try:
-                        value, _ = winreg.QueryValueEx(sub, "DisplayName")
-                    except OSError:
-                        continue
-                    name = str(value or "").strip()
+                    name = _reg_str(sub, "DisplayName")
                     if not name:
                         continue
-                    version = ""
-                    try:
-                        ver_val, _ = winreg.QueryValueEx(sub, "DisplayVersion")
-                        version = str(ver_val or "").strip()
-                    except OSError:
-                        pass
-                    line = f"{name} {version}".strip() if version else name
-                    # Preferir entrada com versão se houver colisão de DisplayName.
+                    version = _reg_str(sub, "DisplayVersion")
+                    uninstall_string = _reg_str(sub, "UninstallString")
+                    quiet = _reg_str(sub, "QuietUninstallString")
+                    is_msi, product_code = _detect_msi(sub_name, uninstall_string)
+                    display_line = f"{name} {version}".strip() if version else name
+                    app = InstalledApp(
+                        display_name=name,
+                        version=version,
+                        display_line=display_line,
+                        product_code=product_code,
+                        uninstall_string=uninstall_string,
+                        quiet_uninstall_string=quiet,
+                        is_msi=is_msi,
+                        arch=arch,
+                    )
                     prev = apps.get(name)
-                    if prev is None or (version and prev == name):
-                        apps[name] = line
+                    if prev is None or (version and not prev.version):
+                        apps[name] = app
             except OSError:
                 continue
     finally:
@@ -85,14 +122,31 @@ def _apps_from_uninstall(root, access: int) -> Dict[str, str]:
     return apps
 
 
-def list_remote_installed_apps(host: str) -> List[str]:
+def _with_arch_suffix(app: InstalledApp, arch_label: str) -> InstalledApp:
+    """Acrescenta (64-bit)/(32-bit) no nome quando o DisplayName não indica arquitetura."""
+    label = f"({arch_label})"
+    if label.casefold() in app.display_name.casefold():
+        return app
+    new_name = f"{app.display_name} {label}"
+    display_line = f"{new_name} {app.version}".strip() if app.version else new_name
+    return InstalledApp(
+        display_name=new_name,
+        version=app.version,
+        display_line=display_line,
+        product_code=app.product_code,
+        uninstall_string=app.uninstall_string,
+        quiet_uninstall_string=app.quiet_uninstall_string,
+        is_msi=app.is_msi,
+        arch=app.arch,
+    )
+
+
+def list_remote_installed_apps(host: str) -> List[InstalledApp]:
     """
     Lista aplicativos instalados no host via Remote Registry (HKLM Uninstall),
     unindo as views 64-bit e 32-bit (Wow6432Node).
 
-    Formato alinhado ao PsInfo -s: "DisplayName DisplayVersion".
-    O PsInfo64 -s costuma enxergar só a view nativa 64-bit; por isso o inventário
-    do card Aplicativos usa esta coleta complementar.
+    display_line no formato PsInfo: "DisplayName DisplayVersion".
     """
     h = _strip_host(host)
     if not h:
@@ -104,8 +158,8 @@ def list_remote_installed_apps(host: str) -> List[str]:
         return []
 
     try:
-        apps_64 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
-        apps_32 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_32KEY)
+        apps_64 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_64KEY, "64")
+        apps_32 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_32KEY, "32")
     finally:
         root.Close()
 
@@ -115,27 +169,114 @@ def list_remote_installed_apps(host: str) -> List[str]:
     only_32 = names_32 - names_64
     both = names_64 & names_32
 
-    out: List[str] = []
+    out: List[InstalledApp] = []
     for n in only_64:
         out.append(apps_64[n])
     for n in only_32:
         out.append(apps_32[n])
     for n in both:
-        # Mesmo DisplayName nas duas views: manter as duas linhas (com versão).
-        line_64 = apps_64[n]
-        line_32 = apps_32[n]
-        # Se a linha já não indica arquitetura, acrescenta sufixo no nome.
-        if "(64-bit)" not in line_64.casefold() and "(32-bit)" not in line_64.casefold():
-            name_part = n
-            ver_part = line_64[len(n) :].strip()
-            line_64 = f"{name_part} (64-bit) {ver_part}".strip()
-        if "(64-bit)" not in line_32.casefold() and "(32-bit)" not in line_32.casefold():
-            name_part = n
-            ver_part = line_32[len(n) :].strip()
-            line_32 = f"{name_part} (32-bit) {ver_part}".strip()
-        out.append(line_64)
-        out.append(line_32)
-    return sorted(set(out), key=str.casefold)
+        out.append(_with_arch_suffix(apps_64[n], "64-bit"))
+        out.append(_with_arch_suffix(apps_32[n], "32-bit"))
+
+    # Dedup por (display_line, arch, product_code/uninstall) — manter ordem estável
+    seen: set[tuple[str, str, str]] = set()
+    unique: List[InstalledApp] = []
+    for app in sorted(out, key=lambda a: a.display_line.casefold()):
+        key = (app.display_line.casefold(), app.arch, app.product_code or app.uninstall_string)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(app)
+    return unique
+
+
+def extract_uninstall_executable(uninstall_string: str) -> str:
+    """
+    Extrai o caminho do executável de um UninstallString.
+    Trata caminhos sem aspas com espaços (ex.: C:\\Program Files\\WinRAR\\uninstall.exe).
+    """
+    s = (uninstall_string or "").strip()
+    if not s:
+        return ""
+    if s.lower().startswith("msiexec"):
+        return ""
+    if s.startswith('"'):
+        end = s.find('"', 1)
+        if end > 1:
+            return s[1:end]
+    lower = s.lower()
+    for ext in (".exe", ".cmd", ".bat"):
+        idx = lower.find(ext)
+        if idx != -1:
+            return s[: idx + len(ext)].strip()
+    try:
+        parts = shlex.split(s, posix=False)
+    except ValueError:
+        parts = s.split()
+    if not parts:
+        return ""
+    return parts[0].strip().strip('"')
+
+
+def quote_uninstall_command(cmd: str) -> str:
+    """Garante aspas no executável quando o caminho tem espaços (necessário p/ PsExec)."""
+    s = (cmd or "").strip()
+    if not s:
+        return s
+    if s.lower().startswith("msiexec"):
+        return s
+    if s.startswith('"'):
+        return s
+    exe = extract_uninstall_executable(s)
+    if not exe or " " not in exe:
+        return s
+    if s.startswith(exe):
+        rest = s[len(exe) :].lstrip()
+        return f'"{exe}"' + (f" {rest}" if rest else "")
+    return f'"{exe}"'
+
+
+def build_uninstall_remote_cmd(app: InstalledApp, extra_params: str = "") -> str:
+    """
+    Monta o comando remoto de desinstalação (já com aspas corretas).
+    MSI: msiexec /x '{GUID}' /qn /norestart [extras]
+    EXE com extras: "exe" + extras
+    EXE sem extras: QuietUninstallString ou UninstallString (aspas se necessário)
+    """
+    extra = (extra_params or "").strip()
+
+    if app.is_msi and app.product_code:
+        # Aspas duplas no GUID: mais seguro no cmd.exe do que aspas simples
+        cmd = f'msiexec /x "{app.product_code}" /qn /norestart'
+        if extra:
+            cmd = f"{cmd} {extra}"
+        return cmd
+
+    base = (app.quiet_uninstall_string or "").strip() or (app.uninstall_string or "").strip()
+    if not base:
+        raise ValueError("Este aplicativo não possui string de desinstalação no registro.")
+
+    if extra:
+        exe = extract_uninstall_executable(base)
+        if not exe:
+            raise ValueError("Não foi possível obter o executável de desinstalação deste aplicativo.")
+        quoted = f'"{exe}"' if (" " in exe and not exe.startswith('"')) else exe
+        return f"{quoted} {extra}"
+
+    return quote_uninstall_command(base)
+
+
+def describe_uninstall(app: InstalledApp, extra_params: str = "") -> str:
+    """Texto curto para tooltip: tipo + comando (truncado para o limite do Qt)."""
+    kind = "MSI" if app.is_msi and app.product_code else "EXE"
+    try:
+        cmd = build_uninstall_remote_cmd(app, extra_params)
+    except ValueError as exc:
+        return f"{kind}: {exc}"
+    # Evita "Application text must be shorter than 32768 characters" e tooltips gigantes
+    if len(cmd) > 400:
+        cmd = cmd[:397] + "..."
+    return f"{kind}: {cmd}"
 
 
 def parse_psinfo_output(text: str, host: str = "") -> PsInfoResult:

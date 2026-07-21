@@ -16,6 +16,7 @@ from ui.widgets.log import LogOutputWidget
 from core.executor import Executor
 import subprocess
 import re
+import tempfile
 from ui.tabs.powershell import PowerShellTab
 from ui.tabs.cmd import CmdTab
 from ui.tabs.psinfo import PsInfoTab
@@ -448,6 +449,7 @@ class MainWindow(QMainWindow):
                 return
 
         self.psinfo_tab = PsInfoTab(log_output=self.log_output, host_source=self.psexec_tab.host_edit)
+        self.psinfo_tab.uninstallRequested.connect(self._on_psinfo_uninstall)
         # PsInfo deve ser sempre a última aba
         self.tabs.addTab(self.psinfo_tab, self.tr("PsInfo"))
         psinfo_idx = self.tabs.indexOf(self.psinfo_tab)
@@ -455,6 +457,91 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(psinfo_idx)
         self.psinfo_tab.run_psinfo()
         self._update_psinfo_mode_ui()
+
+    def _on_psinfo_uninstall(self, remote_cmd: str, app_label: str) -> None:
+        """Abre console separado com PsExec (-h -s) para desinstalar o app remoto."""
+        host = (self.psexec_tab.host_edit.text() or "").strip().strip("\\")
+        if not host:
+            self.log_output.append_log(self.tr("[PSINFO] Host remoto não informado para desinstalação."))
+            return
+
+        remote_cmd = (remote_cmd or "").strip()
+        if not remote_cmd:
+            self.log_output.append_log(self.tr("[PSINFO] Comando de desinstalação vazio."))
+            return
+
+        psexec_exe = self._build_psexec_exe()
+        user = (self.psexec_tab.user_edit.text() or "").strip()
+        password = (self.psexec_tab.pass_edit.text() or "").strip()
+
+        creds = ""
+        creds_display = ""
+        if user:
+            creds += f' -u "{self._escape_quotes(user)}"'
+            creds_display += f' -u "{self._escape_quotes(user)}"'
+        if password:
+            creds += f' -p "{self._escape_quotes(password)}"'
+            creds_display += " -p ****"
+
+        # -h eleva; -s roda como SYSTEM. cmd /c no remoto junta exe + argumentos.
+        forced_flags = " -h -s -accepteula -nobanner"
+        # cmd /c no remoto garante que exe + argumentos extras sejam interpretados juntos
+        if not remote_cmd.lower().lstrip().startswith("cmd "):
+            remote_for_psexec = f"cmd /c {remote_cmd}"
+        else:
+            remote_for_psexec = remote_cmd
+        full_cmd = f'{psexec_exe} \\\\{host}{creds}{forced_flags} {remote_for_psexec}'
+        display_cmd = f'{psexec_exe} \\\\{host}{creds_display}{forced_flags} {remote_for_psexec}'
+
+        self.log_output.append_log(
+            self.tr(f"[PSINFO] Desinstalando em {host}: {app_label}")
+        )
+        self.log_output.append_log(self.tr(f"[PSINFO] {display_cmd}"))
+
+        # .bat temporário: mostra acesso + comando + resultado e mantém o console aberto
+        access = user if user else "(credencial atual / integrada)"
+        bat_cmd = full_cmd.replace("%", "%%")
+        safe_app = (app_label or "").replace("&", "e").replace("|", "/").replace("<", "(").replace(">", ")")
+        cmd_txt = os.path.join(tempfile.gettempdir(), f"psexecgui_uninstall_{os.getpid()}.cmd.txt")
+        with open(cmd_txt, "w", encoding="utf-8") as f:
+            f.write(display_cmd)
+
+        bat_lines = [
+            "@echo off",
+            "chcp 65001 >nul",
+            "echo ========================================",
+            "echo  PsInfo - Desinstalacao remota",
+            "echo ========================================",
+            f"echo  Host     : \\\\{host}",
+            f"echo  Acesso   : {access}",
+            f"echo  App      : {safe_app}",
+            "echo ========================================",
+            "echo  Comando completo:",
+            "echo ----------------------------------------",
+            f'type "{cmd_txt}"',
+            "echo.",
+            "echo ----------------------------------------",
+            "echo  Executando...",
+            "echo ========================================",
+            "echo.",
+            bat_cmd,
+            "set EXITCODE=%ERRORLEVEL%",
+            "echo.",
+            "echo ========================================",
+            "if %EXITCODE% EQU 0 (",
+            "  echo  Resultado: SUCESSO  ^(exit code 0^)",
+            ") else (",
+            "  echo  Resultado: FALHA    ^(exit code %EXITCODE%^)",
+            ")",
+            "echo ========================================",
+            "echo.",
+        ]
+        bat_path = os.path.join(tempfile.gettempdir(), f"psexecgui_uninstall_{os.getpid()}.bat")
+        with open(bat_path, "w", encoding="utf-8") as f:
+            f.write("\r\n".join(bat_lines) + "\r\n")
+
+        subprocess.Popen(f'start "PsInfo Uninstall" cmd /k ""{bat_path}""', shell=True)
+        self.log_output.append_log(self.tr("[PSINFO] Comando aberto em terminal externo."))
 
     def _on_tab_changed(self, _index: int) -> None:
         # Se o usuário saiu da aba PsInfo, encerrá-la (remover a aba)
