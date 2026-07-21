@@ -252,10 +252,13 @@ class MainWindow(QMainWindow):
         return f'"{s}"' if " " in s else s
 
     def _build_psexec_exe(self) -> str:
+        from utils.pstools import resolve_pstools_tool
+
         p = (self.psexec_tab.psexec_path_edit.text() or "").strip()
-        if p:
-            p = os.path.normpath(p.replace('"', "").replace("'", ""))
-            return self._quote_if_needed(p)
+        exe = resolve_pstools_tool(p, ("PsExec64.exe", "PsExec.exe"))
+        if exe:
+            exe = os.path.normpath(exe.replace('"', "").replace("'", ""))
+            return self._quote_if_needed(exe)
         return "PsExec.exe"
 
     def on_rustdesk_clicked(self) -> None:
@@ -448,7 +451,11 @@ class MainWindow(QMainWindow):
                 self._update_psinfo_mode_ui()
                 return
 
-        self.psinfo_tab = PsInfoTab(log_output=self.log_output, host_source=self.psexec_tab.host_edit)
+        self.psinfo_tab = PsInfoTab(
+            log_output=self.log_output,
+            host_source=self.psexec_tab.host_edit,
+            pstools_source=self.psexec_tab.psexec_path_edit,
+        )
         self.psinfo_tab.uninstallRequested.connect(self._on_psinfo_uninstall)
         # PsInfo deve ser sempre a última aba
         self.tabs.addTab(self.psinfo_tab, self.tr("PsInfo"))

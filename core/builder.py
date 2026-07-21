@@ -367,8 +367,11 @@ class CommandBuilder:
     def _base_psexec_cmd(self):
         """Monta a base do comando PsExec com parâmetros comuns"""
         import os
+        from utils.pstools import resolve_pstools_tool
+
         host = self.psexec_params.get('host', '').strip()
-        psexec_path = self.psexec_params.get('psexec_path', '').strip()
+        pstools = self.psexec_params.get('psexec_path', '').strip()
+        psexec_path = resolve_pstools_tool(pstools, ("PsExec64.exe", "PsExec.exe"))
         if psexec_path:
             psexec_path = os.path.normpath(psexec_path.replace('"', '').replace("'", ''))
             if ' ' in psexec_path:

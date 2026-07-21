@@ -73,7 +73,16 @@ class _PsInfoWorker(QThread):
     finished_ok = pyqtSignal(str, object)  # stdout, apps override (list[InstalledApp] | None)
     finished_err = pyqtSignal(str)  # erro amigável
 
-    def __init__(self, exe_path: str, host: str, include_apps: bool, include_disks: bool, accepteula: bool, nobanner: bool):
+    def __init__(
+        self,
+        exe_path: str,
+        host: str,
+        include_apps: bool,
+        include_disks: bool,
+        accepteula: bool,
+        nobanner: bool,
+        pstools_dir: str = "",
+    ):
         super().__init__()
         self.exe_path = exe_path
         self.host = host
@@ -81,9 +90,12 @@ class _PsInfoWorker(QThread):
         self.include_disks = include_disks
         self.accepteula = accepteula
         self.nobanner = nobanner
+        self.pstools_dir = pstools_dir
 
     def run(self) -> None:
         try:
+            from utils.pstools import resolve_pstools_tool
+
             target = build_psinfo_target(self.host)
             if not target:
                 self.finished_err.emit("Host remoto não informado.")
@@ -93,8 +105,12 @@ class _PsInfoWorker(QThread):
             if exe:
                 exe = os.path.normpath(exe.replace('"', "").replace("'", ""))
             else:
-                default = r"C:\PSTools\PsInfo64.exe"
-                exe = default if os.path.isfile(default) else "PsInfo64.exe"
+                exe = resolve_pstools_tool(
+                    self.pstools_dir or r"C:\PSTools",
+                    ("PsInfo64.exe", "PsInfo.exe"),
+                )
+                if not exe:
+                    exe = "PsInfo64.exe"
 
             args = [exe, target]
             if self.include_apps:
@@ -162,7 +178,9 @@ class _PsInfoWorker(QThread):
             # Mesmo com returncode != 0, o PsInfo às vezes escreve dados úteis em stdout.
             self.finished_ok.emit(out if out else err, apps_override)
         except FileNotFoundError:
-            self.finished_err.emit("Não foi possível encontrar o PsInfo64.exe. Ajuste o caminho na aba PsInfo.")
+            self.finished_err.emit(
+                "Não foi possível encontrar o PsInfo. Ajuste a pasta PSTools na aba Conexão."
+            )
         except Exception as exc:
             self.finished_err.emit(f"Erro ao executar PsInfo: {exc}")
 
@@ -171,11 +189,18 @@ class PsInfoTab(QWidget):
     # remote_cmd, rótulo do app (para log)
     uninstallRequested = pyqtSignal(str, str)
 
-    def __init__(self, parent=None, log_output=None, host_source: Optional[QLineEdit] = None):
+    def __init__(
+        self,
+        parent=None,
+        log_output=None,
+        host_source: Optional[QLineEdit] = None,
+        pstools_source: Optional[QLineEdit] = None,
+    ):
         super().__init__(parent)
         self.log_output = log_output
         self._worker: Optional[_PsInfoWorker] = None
         self._host_source = host_source
+        self._pstools_source = pstools_source
         self._loading_card: Optional[CardWidget] = None
         self._apps_extra_params: Optional[QLineEdit] = None
 
@@ -733,6 +758,10 @@ class PsInfoTab(QWidget):
 
         self._set_loading(True, host=host)
 
+        pstools = ""
+        if self._pstools_source is not None:
+            pstools = (self._pstools_source.text() or "").strip()
+
         # Sem UI de checkboxes: sempre executar com tudo marcado.
         self._worker = _PsInfoWorker(
             exe_path="",
@@ -741,6 +770,7 @@ class PsInfoTab(QWidget):
             include_disks=True,
             accepteula=True,
             nobanner=True,
+            pstools_dir=pstools,
         )
         self._worker.finished_ok.connect(self._on_psinfo_ok)
         self._worker.finished_err.connect(self._on_psinfo_err)

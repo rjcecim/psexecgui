@@ -135,26 +135,26 @@ class PsExecTab(QWidget):
         card1 = CardWidget("\uEA18", self.tr("Conexão"))
         g1 = _grid_in_card(card1)
 
-        # PsExec.exe
+        # PSTools (pasta com PsExec.exe e PsInfo)
         psexec_row = QHBoxLayout()
         psexec_row.setSpacing(4)
         psexec_row.setContentsMargins(0, 0, 0, 0)
         self.psexec_path_edit = QLineEdit()
         self.psexec_path_edit.setPlaceholderText(
-            self.tr("Caminho para PsExec.exe (deixe vazio para usar PATH)")
+            self.tr(r"Pasta das PSTools (ex: C:\PSTools\)")
         )
-        self.psexec_path_edit.setText(r"C:\PSTools\PsExec.exe")
+        self.psexec_path_edit.setText("C:\\PSTools\\")
         self.psexec_path_edit.setToolTip(
-            self.tr("Caminho completo para PsExec.exe")
+            self.tr("Pasta onde estão PsExec.exe e PsInfo (PsInfo64.exe / PsInfo.exe)")
         )
-        self.psexec_browse_button = _icon_button("\uED25", self.tr("Procurar PsExec.exe"))
+        self.psexec_browse_button = _icon_button("\uED25", self.tr("Procurar pasta PSTools"))
         self.psexec_browse_button.clicked.connect(self.browse_psexec)
         psexec_row.addWidget(self.psexec_path_edit)
         psexec_row.addWidget(self.psexec_browse_button)
         psexec_container = QWidget()
         psexec_container.setLayout(psexec_row)
         psexec_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_row(g1, 0, self.tr("PsExec.exe"), psexec_container)
+        _add_row(g1, 0, self.tr("PSTools"), psexec_container)
 
         # Host remoto
         host_row = QHBoxLayout()
@@ -429,14 +429,19 @@ class PsExecTab(QWidget):
             self.priority_combo.setToolTip(self._priority_tooltips[idx])
 
     def browse_psexec(self):
-        dlg = QFileDialog(self)
-        dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
-        dlg.setNameFilter(self.tr("Executáveis (*.exe)"))
-        dlg.setWindowTitle(self.tr("Selecionar PsExec.exe"))
-        if dlg.exec():
-            files = dlg.selectedFiles()
-            if files:
-                self.psexec_path_edit.setText(files[0])
+        start = (self.psexec_path_edit.text() or r"C:\PSTools").strip()
+        if start.lower().endswith(".exe"):
+            start = os.path.dirname(start) or r"C:\PSTools"
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            self.tr("Selecionar pasta PSTools"),
+            start if os.path.isdir(start) else r"C:\PSTools",
+        )
+        if folder:
+            # Mantém barra final para deixar claro que é pasta
+            if not folder.endswith(("\\", "/")):
+                folder = folder + "\\"
+            self.psexec_path_edit.setText(folder)
 
     def ping_host(self):
         import subprocess
