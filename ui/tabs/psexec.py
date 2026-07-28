@@ -207,7 +207,7 @@ class PsExecTab(QWidget):
 
         # ── Card 2 — Autenticação ─────────────────────────────────────────────
         card2 = CardWidget("\uE8D7", self.tr("Autenticação"))
-        card2.set_collapsible(True, collapsed=False)
+        card2.set_collapsible(True, collapsed=True)
         g2 = _grid_in_card(card2)
 
         user_container, self.user_edit = _line_edit_with_clear_icon(password=False)
@@ -280,7 +280,7 @@ class PsExecTab(QWidget):
 
         # ── Card 4 — Desempenho ───────────────────────────────────────────────
         card4 = CardWidget("\uE950", self.tr("Desempenho"))
-        card4.set_collapsible(True, collapsed=False)
+        card4.set_collapsible(True, collapsed=True)
         g4 = _grid_in_card(card4)
 
         # Prioridade

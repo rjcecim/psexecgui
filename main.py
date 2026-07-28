@@ -243,6 +243,8 @@ class MainWindow(QMainWindow):
         self.psexec_tab.openPsInfoRequested.connect(self.open_psinfo_tab)
         self.psexec_tab.openRustDeskRequested.connect(self.on_rustdesk_clicked)
         self.psexec_tab.formLayoutChanged.connect(self._on_psexec_form_layout_changed)
+        # Cards Autenticação/Desempenho já abrem recolhidos → ajusta Preview/Log
+        self._on_psexec_form_layout_changed()
         self.psexec_tab.psexec_path_edit.textChanged.connect(self.update_command)
         self.psexec_tab.user_edit.textChanged.connect(self.update_command)
         self.psexec_tab.pass_edit.textChanged.connect(self.update_command)
