@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt, pyqtSignal
 from utils.api import get_processor_groups, get_processor_count
-from ui.style import ICON_FONT_PT, CARD_GRID_VERTICAL_SPACING
+from ui.style import ICON_FONT_PT, CARD_GRID_VERTICAL_SPACING, INPUT_HEIGHT
 from utils.validator import AffinityValidator
 from ui.widgets.card import CardWidget
 from ui.widgets.flow import FlowLayout
@@ -27,7 +27,7 @@ def _make_label(text: str) -> QLabel:
     return lbl
 
 
-def _icon_button(icon_char: str, tooltip: str = "", size: int = 32) -> QPushButton:
+def _icon_button(icon_char: str, tooltip: str = "", size: int = INPUT_HEIGHT) -> QPushButton:
     btn = QPushButton(icon_char)
     font = QFont("Segoe MDL2 Assets", ICON_FONT_PT)
     btn.setFont(font)
@@ -49,7 +49,7 @@ def _icon_button(icon_char: str, tooltip: str = "", size: int = 32) -> QPushButt
 
 
 def _add_row(grid: QGridLayout, row: int, label_text: str, widget: QWidget):
-    """Adiciona label + widget em uma linha do grid."""
+    """Adiciona label + widget em uma linha do grid (label centralizado na vertical)."""
     lbl = _make_label(label_text)
     grid.addWidget(lbl, row, 0, Qt.AlignmentFlag.AlignVCenter)
     grid.addWidget(widget, row, 1, Qt.AlignmentFlag.AlignVCenter)
@@ -69,24 +69,33 @@ def _line_edit_with_clear_icon(password: bool = False):
     """
     Container com QLineEdit e ícone de remover à direita.
     Retorna (container, line_edit). O ícone só aparece quando há texto.
+    Altura igual aos demais QLineEdit (INPUT_HEIGHT).
     """
     container = QWidget()
-    container.setStyleSheet("""
-        QWidget#AuthField {
+    container.setObjectName("AuthField")
+    container.setFixedHeight(INPUT_HEIGHT)
+    container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    container.setStyleSheet(f"""
+        QWidget#AuthField {{
             border: 1px solid palette(mid);
             border-radius: 4px;
             background: palette(base);
-        }
-        QWidget#AuthField:focus-within { border-color: palette(highlight); }
+        }}
+        QWidget#AuthField:focus-within {{ border-color: palette(highlight); }}
+        QWidget#AuthField QLineEdit {{
+            border: none;
+            background: transparent;
+            padding: 0;
+            min-height: 0px;
+            max-height: {INPUT_HEIGHT}px;
+        }}
     """)
-    container.setObjectName("AuthField")
     layout = QHBoxLayout(container)
-    layout.setContentsMargins(4, 2, 4, 2)
-    layout.setSpacing(4)
+    layout.setContentsMargins(8, 0, 4, 0)
+    layout.setSpacing(2)
 
     line_edit = QLineEdit()
-    line_edit.setStyleSheet("border: none; background: transparent; padding: 0 28px 0 0;")
-    line_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    line_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     clear_btn = QToolButton()
     clear_btn.setText("\uE711")
     clear_btn.setFont(QFont("Segoe MDL2 Assets", 10))
@@ -112,7 +121,7 @@ def _line_edit_with_clear_icon(password: bool = False):
     clear_btn.clicked.connect(on_clear)
 
     layout.addWidget(line_edit)
-    layout.addWidget(clear_btn)
+    layout.addWidget(clear_btn, 0, Qt.AlignmentFlag.AlignVCenter)
     return container, line_edit
 
 
@@ -121,18 +130,22 @@ def _line_edit_with_clear_icon(password: bool = False):
 class PsExecTab(QWidget):
     openPsInfoRequested = pyqtSignal()
     openRustDeskRequested = pyqtSignal()
+    formLayoutChanged = pyqtSignal()
 
     def __init__(self, parent=None, log_output=None):
         super().__init__(parent)
         self.log_output = log_output
 
-        # Layout direto na aba (sem barra de rolagem — todos os cards visíveis)
+        # Formulário: altura = conteúdo (sem stretch). Sobra vertical fica
+        # para Pré-visualização e Log no layout da janela principal.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         vbox = QVBoxLayout(self)
         vbox.setContentsMargins(4, 4, 4, 4)
         vbox.setSpacing(3)
 
         # ── Card 1 — Conexão ─────────────────────────────────────────────────
         card1 = CardWidget("\uEA18", self.tr("Conexão"))
+        card1.set_collapsible(True, collapsed=False)
         g1 = _grid_in_card(card1)
 
         # PSTools (pasta com PsExec.exe e PsInfo)
@@ -194,6 +207,7 @@ class PsExecTab(QWidget):
 
         # ── Card 2 — Autenticação ─────────────────────────────────────────────
         card2 = CardWidget("\uE8D7", self.tr("Autenticação"))
+        card2.set_collapsible(True, collapsed=False)
         g2 = _grid_in_card(card2)
 
         user_container, self.user_edit = _line_edit_with_clear_icon(password=False)
@@ -211,6 +225,7 @@ class PsExecTab(QWidget):
 
         # ── Card 3 — Privilégios e Sessão ─────────────────────────────────────
         card3 = CardWidget("\uE8D4", self.tr("Privilégios e Sessão"))
+        card3.set_collapsible(True, collapsed=False)
         g3 = _grid_in_card(card3)
 
         # Elevação
@@ -265,6 +280,7 @@ class PsExecTab(QWidget):
 
         # ── Card 4 — Desempenho ───────────────────────────────────────────────
         card4 = CardWidget("\uE950", self.tr("Desempenho"))
+        card4.set_collapsible(True, collapsed=False)
         g4 = _grid_in_card(card4)
 
         # Prioridade
@@ -312,6 +328,7 @@ class PsExecTab(QWidget):
 
         # ── Card 5 — Flags e Argumentos ──────────────────────────────────────
         card5 = CardWidget("\uE115", self.tr("Flags e Argumentos"))
+        card5.set_collapsible(True, collapsed=False)
         g5 = _grid_in_card(card5)
 
         # Timeout
@@ -334,8 +351,8 @@ class PsExecTab(QWidget):
         timeout_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         _add_row(g5, 0, self.tr("Timeout"), timeout_container)
 
-        # Flags
-        flags_flow = FlowLayout(margin=0, h_spacing=10, v_spacing=6)
+        # Flags (podem quebrar linha; espaçamento entre Timeout/Flags/Args = 4 px no grid)
+        flags_flow = FlowLayout(margin=0, h_spacing=10, v_spacing=4)
         self.flag_d = QCheckBox("-d")
         self.flag_d.setToolTip(self.tr("Não aguardar o processo terminar"))
         self.flag_e = QCheckBox("-e")
@@ -357,7 +374,9 @@ class PsExecTab(QWidget):
             flags_flow.addWidget(cb)
         flags_container = QWidget()
         flags_container.setLayout(flags_flow)
-        flags_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        flags_sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        flags_sp.setHeightForWidth(True)
+        flags_container.setSizePolicy(flags_sp)
         _add_row(g5, 1, self.tr("Flags"), flags_container)
 
         # Args extras
@@ -380,6 +399,17 @@ class PsExecTab(QWidget):
         ]
         self.update_priority_tooltip()
         self.update_affinity_for_group()
+
+        # Recolher/expandir formulário libera altura para Preview/Log na janela
+        self._form_cards = (card1, card2, card3, card4, card5)
+        for card in self._form_cards:
+            card.collapsedChanged.connect(self._on_form_card_collapsed)
+
+    def _on_form_card_collapsed(self, _collapsed: bool = False) -> None:
+        self.updateGeometry()
+        if self.layout() is not None:
+            self.layout().activate()
+        self.formLayoutChanged.emit()
 
     # ── slots ─────────────────────────────────────────────────────────────────
 

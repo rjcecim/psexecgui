@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QGridLayout, QToolButton,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QPalette
+from PyQt6.QtGui import QFont
 
 from ui.style import FONT_UI, SIZE_UI, CARD_GRID_VERTICAL_SPACING
 
@@ -22,7 +22,7 @@ def make_field_label(text: str) -> QLabel:
 
 
 def add_row(grid: QGridLayout, row: int, label_text: str, widget: QWidget) -> None:
-    """Adiciona uma linha label + widget no grid do card."""
+    """Adiciona uma linha label + widget no grid do card (label centralizado na vertical)."""
     lbl = make_field_label(label_text)
     grid.addWidget(lbl, row, 0, Qt.AlignmentFlag.AlignVCenter)
     grid.addWidget(widget, row, 1, Qt.AlignmentFlag.AlignVCenter)
@@ -205,13 +205,16 @@ class CardWidget(QWidget):
         else:
             self.setMinimumHeight(0)
             self.setMaximumHeight(_QWIDGETSIZE_MAX)
-            # Libera altura fixa
-            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             if self._wants_expanding:
                 self.set_expanding(True)
             else:
-                self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-                self._container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+                # Formulário: altura = conteúdo; não absorve stretch do layout pai
+                self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+                self._container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+                self._content_widget.setSizePolicy(
+                    QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+                )
+                self._container_layout.setStretchFactor(self._content_widget, 0)
             self._apply_parent_stretch(self._layout_stretch)
 
         self.updateGeometry()

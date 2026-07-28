@@ -1,36 +1,29 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLabel, QHBoxLayout
+from PyQt6.QtWidgets import QTextEdit, QSizePolicy
 from PyQt6.QtGui import QFont, QTextCursor
 import re
 
-from ui.style import FONT_MONO, SIZE_MONO, ICON_FONT_PT
+from ui.style import FONT_MONO, SIZE_MONO
+from ui.widgets.card import CardWidget
 
-class LogOutputWidget(QWidget):
+
+class LogOutputWidget(CardWidget):
+    """Card expansível com o log de execução."""
+
     def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setSpacing(2)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        label_layout = QHBoxLayout()
-        label_layout.setContentsMargins(0, 0, 0, 0)
-        # \uE9F9 = BulletedList / Log (Segoe MDL2 Assets)
-        self.icon_label = QLabel("\uE9F9")
-        self.icon_label.setFont(QFont("Segoe MDL2 Assets", ICON_FONT_PT))
-        self.icon_label.setStyleSheet("color: palette(highlight);")
-        self.text_label = QLabel(self.tr("Log de Execução:"))
-        label_layout.addWidget(self.icon_label)
-        label_layout.addWidget(self.text_label)
-        label_layout.addStretch()
+        super().__init__("\uE9F9", "Log de Execução", parent)
+        self._title_label.setText(self.tr("Log de Execução"))
+        self.set_layout_stretch(1)
+        self.set_expanding(True)
+        self.set_collapsible(True, collapsed=False)
 
         self.text_edit = QTextEdit()
         self.text_edit.setReadOnly(True)
         self.text_edit.setFont(QFont(FONT_MONO, SIZE_MONO))
-        self.text_edit.setMaximumHeight(120)  # Altura máxima reduzida
-        self.text_edit.setMinimumHeight(80)   # Altura mínima
-
-        layout.addLayout(label_layout)
-        layout.addWidget(self.text_edit)
-        self.setLayout(layout)
+        self.text_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.text_edit.setMinimumHeight(56)
+        self.content_layout.addWidget(self.text_edit, 1)
 
     def append_log(self, text: str):
         # Filtra linhas de animação (ex: '-', '\\', '|', '/') que aparecem sozinhas ou com espaços

@@ -13,7 +13,10 @@ SIZE_MONO = 9
 ICON_FONT_PT = 13
 
 # Espaçamento vertical entre linhas de campos dentro dos cards (referência: card Conexão)
-CARD_GRID_VERTICAL_SPACING = 2
+CARD_GRID_VERTICAL_SPACING = 4
+
+# Altura visual única dos campos de texto (inclui borda de 1px)
+INPUT_HEIGHT = 32
 
 
 def apply_ui_defaults(app: QApplication) -> None:
@@ -28,35 +31,43 @@ def apply_ui_defaults(app: QApplication) -> None:
     app.setFont(font)
 
     base = app.styleSheet() or ""
+    # min/max-height no stylesheet é a área de conteúdo; a borda 1px soma 2px no total.
+    content_h = INPUT_HEIGHT - 2
     # Não definir font-family em QLabel/QPushButton/QToolButton no stylesheet,
     # para não sobrescrever os ícones (Segoe MDL2 Assets) definidos com setFont().
     # O app.setFont() acima já define Segoe UI como padrão para o resto.
     app.setStyleSheet(
         base
-        + """
-        QLineEdit {
+        + f"""
+        QLineEdit {{
             font-family: "Segoe UI";
-            min-height: 22px;
+            min-height: {content_h}px;
+            max-height: {content_h}px;
             border: 1px solid palette(mid);
             border-radius: 4px;
-            padding: 4px 8px;
-        }
-        QLineEdit:focus {
+            padding: 0 8px;
+        }}
+        QLineEdit:focus {{
             border-color: palette(highlight);
-        }
-        QComboBox, QSpinBox, QCheckBox {
+        }}
+        QComboBox, QSpinBox {{
+            font-family: "Segoe UI";
+            min-height: {content_h}px;
+            max-height: {content_h}px;
+        }}
+        QCheckBox {{
             font-family: "Segoe UI";
             min-height: 22px;
-        }
-        QPlainTextEdit, QTextEdit {
+        }}
+        QPlainTextEdit, QTextEdit {{
             padding: 2px;
-        }
-        QPushButton, QToolButton {
+        }}
+        QPushButton, QToolButton {{
             min-height: 22px;
-        }
-        QTabBar::tab {
+        }}
+        QTabBar::tab {{
             padding: 4px 8px;
-        }
+        }}
         """
     )
 

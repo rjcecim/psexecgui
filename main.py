@@ -2,7 +2,7 @@ import sys
 import os
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QTabWidget, QPushButton,
-    QHBoxLayout, QCheckBox, QLabel, QTabBar, QStyle, QStyleOptionTab
+    QHBoxLayout, QCheckBox, QLabel, QTabBar, QStyle, QStyleOptionTab, QSizePolicy
 )
 from PyQt6.QtCore import QCoreApplication, Qt, QRect, QSize
 from PyQt6.QtGui import QFont, QFontMetrics, QPainter, QColor, QPalette
@@ -33,23 +33,51 @@ _MDL2_FONT = QFont("Segoe MDL2 Assets", ICON_FONT_PT)
 class _Mdl2TabBar(QTabBar):
     """TabBar que desenha ícone (char Unicode) + texto; ícone em tabData(UserRole)."""
 
+    # Margens horizontais do paintEvent (esquerda / gap ícone-texto / direita)
+    _PAD_LEFT = 8
+    _PAD_GAP = 4
+    _PAD_RIGHT = 8
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._icon_font = QFont("Segoe MDL2 Assets", ICON_FONT_PT)
-        # Cada aba usa o tamanho do seu conteúdo (sem expandir igualmente), evitando texto cortado
+        # Largura por conteúdo; não comprimir títulos — usa rolagem se faltar espaço
         self.setExpanding(False)
+        self.setElideMode(Qt.TextElideMode.ElideNone)
+        self.setUsesScrollButtons(True)
+        self.setMovable(False)
+
+    def _tab_content_width(self, index: int) -> int:
+        icon = self.tabData(index) or ""
+        text = self.tabText(index) or ""
+
+        # Reservar espaço para negrito (aba selecionada) para o título não cortar
+        text_font = QFont(self.font())
+        text_font_bold = QFont(text_font)
+        text_font_bold.setBold(True)
+        text_w = max(
+            QFontMetrics(text_font).horizontalAdvance(text),
+            QFontMetrics(text_font_bold).horizontalAdvance(text),
+        )
+
+        icon_w = 0
+        if icon and isinstance(icon, str):
+            icon_w = QFontMetrics(self._icon_font).horizontalAdvance(icon)
+
+        # Mesmo layout do paintEvent: pad + ícone + gap + texto + pad
+        width = self._PAD_LEFT + icon_w + (self._PAD_GAP if icon_w else 0) + text_w + self._PAD_RIGHT
+        # Folga para borda/estilo da tab (evita corte em DPI/temas)
+        width += self.style().pixelMetric(
+            QStyle.PixelMetric.PM_TabBarTabHSpace, None, self
+        )
+        return max(60, width)
 
     def tabSizeHint(self, index):
-        icon = self.tabData(index) or ""
-        text = self.tabText(index)
-        # Reservar espaço para texto em negrito (aba selecionada) para não cortar
-        text_w = self.fontMetrics().horizontalAdvance(text)
-        f_bold = QFont(self.font())
-        f_bold.setBold(True)
-        text_w = max(text_w, QFontMetrics(f_bold).horizontalAdvance(text))
-        icon_w = QFontMetrics(self._icon_font).horizontalAdvance(icon) + 4 if (icon and isinstance(icon, str)) else 0
-        total_w = 20 + icon_w + text_w
-        return QSize(max(60, total_w), super().tabSizeHint(index).height())
+        return QSize(self._tab_content_width(index), super().tabSizeHint(index).height())
+
+    def minimumTabSizeHint(self, index):
+        # Impede o Qt de encolher a aba e cortar "PowerShell" / "Robocopy" etc.
+        return self.tabSizeHint(index)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -72,14 +100,26 @@ class _Mdl2TabBar(QTabBar):
                 painter.setFont(self._icon_font)
                 painter.setPen(highlight)
                 icon_w = painter.fontMetrics().horizontalAdvance(icon_char)
-                painter.drawText(rect.adjusted(8, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, icon_char)
+                painter.drawText(
+                    rect.adjusted(self._PAD_LEFT, 0, -self._PAD_RIGHT, 0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    icon_char,
+                )
                 painter.setFont(text_font)
                 painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
-                painter.drawText(rect.adjusted(8 + icon_w + 4, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+                painter.drawText(
+                    rect.adjusted(self._PAD_LEFT + icon_w + self._PAD_GAP, 0, -self._PAD_RIGHT, 0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    text,
+                )
             else:
                 painter.setFont(text_font)
                 painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
-                painter.drawText(rect.adjusted(8, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+                painter.drawText(
+                    rect.adjusted(self._PAD_LEFT, 0, -self._PAD_RIGHT, 0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    text,
+                )
 
 
 def _action_button(icon_char: str, tooltip: str, parent=None):
@@ -127,16 +167,25 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(icon)
         central = QWidget()
         vbox = QVBoxLayout(central)
-        vbox.setSpacing(0)  # Elementos bem próximos na vertical
+        vbox.setSpacing(3)
         vbox.setContentsMargins(4, 4, 4, 4)
 
         # Marca + título e seletor de arquivo na mesma linha
         self.file_selector = FileSelectorWidget(self)
-        vbox.addWidget(self._build_brand_header())
-        
+        vbox.addWidget(self._build_brand_header(), 0)
+
         # Tabs (ícone = char Unicode em TabBar customizada)
+        # stretch 0: formulário/abas não absorvem espaço vertical restante
         self.tabs = QTabWidget()
-        self.tabs.setTabBar(_Mdl2TabBar(self.tabs))
+        tab_bar = _Mdl2TabBar(self.tabs)
+        self.tabs.setTabBar(tab_bar)
+        # QTabWidget pode reativar expanding ao associar a TabBar
+        tab_bar.setExpanding(False)
+        tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
+        tab_bar.setUsesScrollButtons(True)
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.log_output = LogOutputWidget()
         self.psexec_tab = PsExecTab(log_output=self.log_output)
         self.psinfo_tab = None
@@ -144,15 +193,18 @@ class MainWindow(QMainWindow):
         self.robocopy_tab = RobocopyTab()
         self.powershell_tab = PowerShellTab()
         self.cmd_tab = CmdTab()
+        for _tab in (self.psexec_tab, self.msi_tab, self.robocopy_tab, self.powershell_tab, self.cmd_tab):
+            _tab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         # \uE8AF = Network/Computer (Segoe MDL2 Assets)
         self.tabs.addTab(self.psexec_tab, self.tr("PsExec"))
         self.tabs.tabBar().setTabData(0, "\uE8AF")
-        vbox.addWidget(self.tabs)
-        
-        # Preview do comando - posicionado imediatamente abaixo das abas
+        self._refresh_tab_bar_layout()
+        vbox.addWidget(self.tabs, 0)
+
+        # Preview e Log: stretch 1 cada — dividem o espaço vertical restante
         self.command_preview = CommandPreviewWidget()
-        vbox.addWidget(self.command_preview)
-        
+        vbox.addWidget(self.command_preview, 1)
+
         # Botões executar/parar/reiniciar: só char Unicode, sem texto (tooltip para acessibilidade)
         button_layout = QHBoxLayout()
         button_layout.addStretch()
@@ -165,11 +217,16 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.stop_button)
         button_layout.addWidget(self.restart_button)
         button_layout.setSpacing(4)
-        vbox.addLayout(button_layout)
-        
-        # Log de saída - posicionado por último
-        vbox.addWidget(self.log_output)
-        
+        vbox.addLayout(button_layout, 0)
+
+        vbox.addWidget(self.log_output, 1)
+        self._main_layout = vbox
+        self._bottom_stretch_idx = None
+
+        self.command_preview.collapsedChanged.connect(self._redistribute_expandable_space)
+        self.log_output.collapsedChanged.connect(self._redistribute_expandable_space)
+        self._redistribute_expandable_space()
+
         self.setCentralWidget(central)
         self._apply_initial_geometry()
         
@@ -185,6 +242,7 @@ class MainWindow(QMainWindow):
         self.psexec_tab.host_edit.textChanged.connect(self.update_command)
         self.psexec_tab.openPsInfoRequested.connect(self.open_psinfo_tab)
         self.psexec_tab.openRustDeskRequested.connect(self.on_rustdesk_clicked)
+        self.psexec_tab.formLayoutChanged.connect(self._on_psexec_form_layout_changed)
         self.psexec_tab.psexec_path_edit.textChanged.connect(self.update_command)
         self.psexec_tab.user_edit.textChanged.connect(self.update_command)
         self.psexec_tab.pass_edit.textChanged.connect(self.update_command)
@@ -461,6 +519,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.psinfo_tab, self.tr("PsInfo"))
         psinfo_idx = self.tabs.indexOf(self.psinfo_tab)
         self.tabs.tabBar().setTabData(psinfo_idx, "\uE946")  # Info
+        self._refresh_tab_bar_layout()
         self.tabs.setCurrentIndex(psinfo_idx)
         self.psinfo_tab.run_psinfo()
         self._update_psinfo_mode_ui()
@@ -566,6 +625,82 @@ class MainWindow(QMainWindow):
         # Aba PowerShell/CMD ativa muda o método de montagem do comando
         self.update_command()
 
+    def _on_psexec_form_layout_changed(self) -> None:
+        """Formulário recolhido/expandido: abas encolhem e Preview/Log absorvem a sobra."""
+        self.tabs.updateGeometry()
+        if self._main_layout is not None:
+            self._main_layout.activate()
+        if self.centralWidget() is not None:
+            self.centralWidget().updateGeometry()
+        self._redistribute_expandable_space()
+
+    def _redistribute_expandable_space(self, _collapsed: bool = False) -> None:
+        """
+        Divide o espaço vertical restante entre Pré-visualização e Log abertos.
+        Com ambos recolhidos, um stretch final absorve a sobra (formulário não estica).
+        Na aba PsInfo, as abas absorvem o espaço (preview/log ocultos).
+        """
+        lay = getattr(self, "_main_layout", None)
+        if lay is None:
+            return
+
+        # Não usar isVisible(): antes do show() os widgets estão ocultos e
+        # isso ativaria o stretch final por engano no startup.
+        is_psinfo = (
+            self.psinfo_tab is not None
+            and self.tabs.currentWidget() == self.psinfo_tab
+        )
+
+        tabs_idx = lay.indexOf(self.tabs)
+        if is_psinfo:
+            if tabs_idx >= 0:
+                lay.setStretch(tabs_idx, 1)
+            self.tabs.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            for w in (self.command_preview, self.log_output):
+                idx = lay.indexOf(w)
+                if idx >= 0:
+                    lay.setStretch(idx, 0)
+            if self._bottom_stretch_idx is not None:
+                lay.setStretch(self._bottom_stretch_idx, 0)
+            lay.activate()
+            if self.centralWidget() is not None:
+                self.centralWidget().updateGeometry()
+            return
+
+        if tabs_idx >= 0:
+            lay.setStretch(tabs_idx, 0)
+        self.tabs.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+
+        expandables = [self.command_preview, self.log_output]
+        open_cards = [w for w in expandables if not w.is_collapsed]
+
+        for w in expandables:
+            idx = lay.indexOf(w)
+            if idx < 0:
+                continue
+            stretch = 1 if (w in open_cards) else 0
+            w.set_layout_stretch(1)
+            lay.setStretch(idx, stretch)
+
+        # Stretch final: só quando nenhum expansível está aberto
+        need_tail = len(open_cards) == 0
+        if need_tail:
+            if self._bottom_stretch_idx is None:
+                lay.addStretch(1)
+                self._bottom_stretch_idx = lay.count() - 1
+            else:
+                lay.setStretch(self._bottom_stretch_idx, 1)
+        elif self._bottom_stretch_idx is not None:
+            lay.setStretch(self._bottom_stretch_idx, 0)
+
+        lay.activate()
+        if self.centralWidget() is not None:
+            self.centralWidget().updateGeometry()
+
     def _update_psinfo_mode_ui(self) -> None:
         """
         A aba PsInfo é uma tela de inventário; não precisa do preview do comando e log.
@@ -576,6 +711,7 @@ class MainWindow(QMainWindow):
         self.run_button.setVisible(not is_psinfo)
         self.stop_button.setVisible(not is_psinfo)
         self.restart_button.setVisible(not is_psinfo)
+        self._redistribute_expandable_space()
 
     def _build_brand_header(self) -> QWidget:
         row = QWidget()
@@ -735,7 +871,11 @@ class MainWindow(QMainWindow):
         def _insert_tab(widget, title: str, icon_char: str) -> None:
             nonlocal insert_at
             self.tabs.insertTab(insert_at, widget, title)
-            self.tabs.tabBar().setTabData(insert_at, icon_char)
+            bar = self.tabs.tabBar()
+            bar.setTabData(insert_at, icon_char)
+            # setTabData não relayouta; reaplicar o texto força layoutTabs()
+            # com o sizeHint já incluindo o ícone (evita "PowerShe" cortado).
+            bar.setTabText(insert_at, title)
             insert_at += 1
 
         # Adiciona MSI / PowerShell / CMD / Robocopy (ícone = char Unicode)
@@ -750,6 +890,21 @@ class MainWindow(QMainWindow):
             self.cmd_tab.set_command_field_enabled(not cmd_by_file)
         if robocopy_enabled:
             _insert_tab(self.robocopy_tab, self.tr("Robocopy"), "\uE8B7")
+
+        # Garante larguras corretas após inserções dinâmicas (comando remoto / arquivo)
+        self._refresh_tab_bar_layout()
+
+    def _refresh_tab_bar_layout(self) -> None:
+        """Recalcula larguras das abas após setTabData/insert dinâmico."""
+        bar = self.tabs.tabBar()
+        bar.setExpanding(False)
+        bar.setElideMode(Qt.TextElideMode.ElideNone)
+        bar.setUsesScrollButtons(True)
+        # setTabText dispara layoutTabs() no Qt — necessário após setTabData (ícone)
+        for i in range(bar.count()):
+            bar.setTabText(i, bar.tabText(i))
+        bar.updateGeometry()
+        self.tabs.updateGeometry()
 
     def build_command_for_execution(self):
         """
