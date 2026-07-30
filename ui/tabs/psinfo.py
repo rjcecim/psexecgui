@@ -453,8 +453,10 @@ class PsInfoTab(QWidget):
                 normalized.append(str(a).strip())
 
         table = QTableWidget()
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels([self.tr("Nome"), self.tr("Versão"), self.tr("Tipo"), ""])
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(
+            [self.tr("Nome"), self.tr("Editor"), self.tr("Versão"), self.tr("Tipo"), ""]
+        )
         table.setRowCount(len(normalized))
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -468,8 +470,9 @@ class PsInfoTab(QWidget):
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        table.setColumnWidth(3, 36)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(4, 36)
         table.setStyleSheet(
             """
             QTableWidget { border: 1px solid palette(mid); border-radius: 4px; }
@@ -485,6 +488,7 @@ class PsInfoTab(QWidget):
         for row, app in enumerate(normalized):
             if isinstance(app, InstalledApp):
                 name = app.display_name or app.display_line
+                publisher = app.publisher or ""
                 version = app.version or ""
                 kind = "MSI" if (app.is_msi and app.product_code) else "EXE"
                 try:
@@ -494,18 +498,21 @@ class PsInfoTab(QWidget):
                     can_uninstall = False
             else:
                 name = str(app)
+                publisher = ""
                 version = ""
                 kind = ""
                 can_uninstall = False
 
             name_item = QTableWidgetItem(name)
             name_item.setData(Qt.ItemDataRole.UserRole, app if isinstance(app, InstalledApp) else None)
+            publisher_item = QTableWidgetItem(publisher)
             version_item = QTableWidgetItem(version)
             kind_item = QTableWidgetItem(kind)
             kind_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             table.setItem(row, 0, name_item)
-            table.setItem(row, 1, version_item)
-            table.setItem(row, 2, kind_item)
+            table.setItem(row, 1, publisher_item)
+            table.setItem(row, 2, version_item)
+            table.setItem(row, 3, kind_item)
 
             trash = QToolButton()
             trash.setText("\uE74D")  # Delete
@@ -542,17 +549,19 @@ class PsInfoTab(QWidget):
             cell_lay.setContentsMargins(0, 0, 0, 0)
             cell_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cell_lay.addWidget(trash)
-            table.setCellWidget(row, 3, cell)
+            table.setCellWidget(row, 4, cell)
 
         def update_filter():
             q = (search.text() or "").strip().lower()
             visible = 0
             for r in range(table.rowCount()):
                 name_it = table.item(r, 0)
-                ver_it = table.item(r, 1)
-                kind_it = table.item(r, 2)
+                pub_it = table.item(r, 1)
+                ver_it = table.item(r, 2)
+                kind_it = table.item(r, 3)
                 text = (
                     f"{name_it.text() if name_it else ''} "
+                    f"{pub_it.text() if pub_it else ''} "
                     f"{ver_it.text() if ver_it else ''} "
                     f"{kind_it.text() if kind_it else ''}"
                 ).lower()
@@ -657,13 +666,14 @@ class PsInfoTab(QWidget):
                 return
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
                 w = csv.writer(f, delimiter=";")
-                w.writerow(["Nome", "Versao", "Tipo", "ProductCode", "UninstallString"])
+                w.writerow(["Nome", "Editor", "Versao", "Tipo", "ProductCode", "UninstallString"])
                 for app in payload or []:
                     if isinstance(app, InstalledApp):
                         kind_app = "MSI" if (app.is_msi and app.product_code) else "EXE"
                         w.writerow(
                             [
                                 app.display_name,
+                                app.publisher,
                                 app.version,
                                 kind_app,
                                 app.product_code,
@@ -671,7 +681,7 @@ class PsInfoTab(QWidget):
                             ]
                         )
                     else:
-                        w.writerow([str(app), "", "", "", ""])
+                        w.writerow([str(app), "", "", "", "", ""])
         elif kind == "discos":
             default_name = f"psinfo_{safe_host}_discos_{stamp}.csv"
             filt = self.tr("CSV (*.csv)")

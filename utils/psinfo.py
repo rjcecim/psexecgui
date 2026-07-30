@@ -32,6 +32,7 @@ class PsInfoDiskRow:
 class InstalledApp:
     display_name: str
     version: str
+    publisher: str
     display_line: str
     product_code: str
     uninstall_string: str
@@ -98,6 +99,7 @@ def _apps_from_uninstall(root, access: int, arch: str) -> Dict[str, InstalledApp
                     if not name:
                         continue
                     version = _reg_str(sub, "DisplayVersion")
+                    publisher = _reg_str(sub, "Publisher")
                     uninstall_string = _reg_str(sub, "UninstallString")
                     quiet = _reg_str(sub, "QuietUninstallString")
                     is_msi, product_code = _detect_msi(sub_name, uninstall_string)
@@ -105,6 +107,7 @@ def _apps_from_uninstall(root, access: int, arch: str) -> Dict[str, InstalledApp
                     app = InstalledApp(
                         display_name=name,
                         version=version,
+                        publisher=publisher,
                         display_line=display_line,
                         product_code=product_code,
                         uninstall_string=uninstall_string,
@@ -132,6 +135,7 @@ def _with_arch_suffix(app: InstalledApp, arch_label: str) -> InstalledApp:
     return InstalledApp(
         display_name=new_name,
         version=app.version,
+        publisher=app.publisher,
         display_line=display_line,
         product_code=app.product_code,
         uninstall_string=app.uninstall_string,

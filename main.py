@@ -1097,13 +1097,20 @@ class MainWindow(QMainWindow):
             robocopy_cmd, psexec_cmd = full_command.split('\n', 1)
             def run_psexec_if_success(exit_code):
                 self.executor.finished.disconnect(run_psexec_if_success)
-                # Robocopy: 0 = nada copiado, 1 = arquivos copiados com sucesso, 2 = arquivos extras
-                # Códigos 0 e 1 são sucesso; 2 também é aceitável (cópia ok, só há extras no destino)
-                robocopy_ok = exit_code in (0, 1, 2)
+                # Robocopy: 0-7 = sucesso/avisos; >= 8 = falha real
+                # 3 = arquivos copiados (1) + extras no destino (2) — comum em redeploy
+                robocopy_ok = 0 <= exit_code <= 7
                 if robocopy_ok and psexec_cmd:
+                    self.log_output.append_log(
+                        self.tr(f"Robocopy OK (código {exit_code}). Iniciando PsExec...")
+                    )
                     # CORREÇÃO: Executar PsExec diretamente no cmd, não dentro de PowerShell
                     subprocess.Popen(f'start cmd /k {psexec_cmd}', shell=True)
                     self.log_output.append_log(self.tr("Comando executado em terminal externo."))
+                else:
+                    self.log_output.append_log(
+                        self.tr(f"Robocopy falhou (código {exit_code}). PsExec nao sera executado.")
+                    )
                 self.run_button.setEnabled(True)
                 self.stop_button.setEnabled(False)
             self.executor.finished.connect(run_psexec_if_success)
