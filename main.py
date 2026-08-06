@@ -17,6 +17,7 @@ from core.executor import Executor
 import subprocess
 import re
 import tempfile
+import uuid
 from ui.tabs.powershell import PowerShellTab
 from ui.tabs.cmd import CmdTab
 from ui.tabs.psinfo import PsInfoTab
@@ -591,11 +592,11 @@ class MainWindow(QMainWindow):
             creds += f' -p "{self._escape_quotes(password)}"'
             creds_display += " -p ****"
 
-        # -h eleva; -s roda como SYSTEM. cmd /c no remoto junta exe + argumentos.
+        # -h eleva; -s roda como SYSTEM.
+        # Aspas externas em cmd /c: necessário p/ paths com espaços/(x86) + parâmetros extras.
         forced_flags = " -h -s -accepteula -nobanner"
-        # cmd /c no remoto garante que exe + argumentos extras sejam interpretados juntos
         if not remote_cmd.lower().lstrip().startswith("cmd "):
-            remote_for_psexec = f"cmd /c {remote_cmd}"
+            remote_for_psexec = f'cmd /c "{remote_cmd}"'
         else:
             remote_for_psexec = remote_cmd
         full_cmd = f'{psexec_exe} \\\\{host}{creds}{forced_flags} {remote_for_psexec}'
@@ -606,22 +607,54 @@ class MainWindow(QMainWindow):
         )
         self.log_output.append_log(self.tr(f"[{log_tag}] {display_cmd}"))
 
-        # .bat temporário: mostra acesso + comando + resultado e mantém o console aberto
-        access = user if user else "(credencial atual / integrada)"
-        bat_cmd = full_cmd.replace("%", "%%")
-        safe_app = (app_label or "").replace("&", "e").replace("|", "/").replace("<", "(").replace(">", ")")
-        cmd_txt = os.path.join(tempfile.gettempdir(), f"psexecgui_uninstall_{os.getpid()}.cmd.txt")
+        def _bat_echo_safe(text: str) -> str:
+            """Escapa caracteres que quebram echo/parsing em arquivos .bat."""
+            t = text or ""
+            for src, dst in (
+                ("%", "%%"),
+                ("^", "^^"),
+                ("&", "^&"),
+                ("|", "^|"),
+                ("<", "^<"),
+                (">", "^>"),
+                ("(", "^("),
+                (")", "^)"),
+                ('"', "'"),
+            ):
+                t = t.replace(src, dst)
+            return t
+
+        # Arquivos únicos por desinstalação — evita sobrescrever o .bat de outra janela
+        # aberta (causa erros como "'DE' não é reconhecido" / "0 foi inesperado").
+        uid = uuid.uuid4().hex[:12]
+        tmp = tempfile.gettempdir()
+        cmd_txt = os.path.join(tmp, f"psexecgui_uninst_{uid}.txt")
+        run_cmd = os.path.join(tmp, f"psexecgui_uninst_{uid}_run.cmd")
+        bat_path = os.path.join(tmp, f"psexecgui_uninst_{uid}.bat")
+
+        access = user if user else "credencial atual / integrada"
+        safe_host = _bat_echo_safe(host)
+        safe_access = _bat_echo_safe(access)
+        safe_app = _bat_echo_safe(app_label or "")
+
         with open(cmd_txt, "w", encoding="utf-8") as f:
             f.write(display_cmd)
 
+        # Comando PsExec isolado: paths com "(x86)" não quebram o wrapper .bat
+        with open(run_cmd, "w", encoding="utf-8") as f:
+            f.write("@echo off\r\n")
+            f.write(full_cmd.replace("%", "%%") + "\r\n")
+            f.write("exit /b %ERRORLEVEL%\r\n")
+
         bat_lines = [
             "@echo off",
+            "setlocal",
             "chcp 65001 >nul",
             "echo ========================================",
             "echo  Desinstalacao remota",
             "echo ========================================",
-            f"echo  Host     : \\\\{host}",
-            f"echo  Acesso   : {access}",
+            f"echo  Host     : \\\\{safe_host}",
+            f"echo  Acesso   : {safe_access}",
             f"echo  App      : {safe_app}",
             "echo ========================================",
             "echo  Comando completo:",
@@ -632,19 +665,20 @@ class MainWindow(QMainWindow):
             "echo  Executando...",
             "echo ========================================",
             "echo.",
-            bat_cmd,
+            f'call "{run_cmd}"',
             "set EXITCODE=%ERRORLEVEL%",
             "echo.",
             "echo ========================================",
-            "if %EXITCODE% EQU 0 (",
-            "  echo  Resultado: SUCESSO  ^(exit code 0^)",
-            ") else (",
-            "  echo  Resultado: FALHA    ^(exit code %EXITCODE%^)",
-            ")",
+            "if not \"%EXITCODE%\"==\"0\" goto :fail",
+            "echo  Resultado: SUCESSO  ^(exit code 0^)",
+            "goto :done",
+            ":fail",
+            "echo  Resultado: FALHA    ^(exit code %EXITCODE%^)",
+            ":done",
             "echo ========================================",
             "echo.",
+            "endlocal",
         ]
-        bat_path = os.path.join(tempfile.gettempdir(), f"psexecgui_uninstall_{os.getpid()}.bat")
         with open(bat_path, "w", encoding="utf-8") as f:
             f.write("\r\n".join(bat_lines) + "\r\n")
 

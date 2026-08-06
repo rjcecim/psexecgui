@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -35,6 +36,9 @@ from utils.psinfo import (
     describe_uninstall,
     list_remote_installed_apps,
 )
+
+# Consultas remotas são I/O-bound; paralelizar acelera a varredura multi-host.
+_SEARCH_MAX_WORKERS = 8
 
 
 def _app_dir() -> str:
@@ -100,20 +104,34 @@ class SearchHit:
 
 
 class _AppSearchWorker(QThread):
-    progress = pyqtSignal(int, int, str)  # done, total, host atual
+    progress = pyqtSignal(int, int, str)  # done, total, último host concluído
     hitsFound = pyqtSignal(list)  # List[SearchHit] do host recém-consultado
     finished_ok = pyqtSignal(str)  # query
     finished_aborted = pyqtSignal(str)  # query (interrupção pelo usuário)
     finished_err = pyqtSignal(str)
 
-    def __init__(self, hosts: List[str], query: str):
+    def __init__(self, hosts: List[str], query: str, max_workers: int = _SEARCH_MAX_WORKERS):
         super().__init__()
         self.hosts = list(hosts)
         self.query = (query or "").strip()
+        self.max_workers = max(1, int(max_workers))
         self._abort = False
 
     def abort(self) -> None:
         self._abort = True
+
+    @staticmethod
+    def _scan_host(host: str, query_cf: str) -> Tuple[str, List[SearchHit]]:
+        try:
+            apps = list_remote_installed_apps(host)
+        except Exception:
+            apps = []
+        hits: List[SearchHit] = []
+        for app in apps:
+            name = (app.display_name or "").casefold()
+            if query_cf in name:
+                hits.append(SearchHit(host=host, app=app))
+        return host, hits
 
     def run(self) -> None:
         try:
@@ -126,25 +144,30 @@ class _AppSearchWorker(QThread):
                 return
 
             total = len(self.hosts)
-            for i, host in enumerate(self.hosts):
-                if self._abort:
-                    self.finished_aborted.emit(self.query)
-                    return
-                self.progress.emit(i, total, host)
-                try:
-                    apps = list_remote_installed_apps(host)
-                except Exception:
-                    apps = []
-                if self._abort:
-                    self.finished_aborted.emit(self.query)
-                    return
-                host_hits: List[SearchHit] = []
-                for app in apps:
-                    name = (app.display_name or "").casefold()
-                    if q in name:
-                        host_hits.append(SearchHit(host=host, app=app))
-                if host_hits:
-                    self.hitsFound.emit(host_hits)
+            workers = min(self.max_workers, total)
+            done = 0
+            executor = ThreadPoolExecutor(max_workers=workers)
+            futures = {
+                executor.submit(self._scan_host, host, q): host for host in self.hosts
+            }
+            try:
+                for fut in as_completed(futures):
+                    if self._abort:
+                        break
+                    host = futures[fut]
+                    try:
+                        host, hits = fut.result()
+                    except Exception:
+                        hits = []
+                    if self._abort:
+                        break
+                    done += 1
+                    self.progress.emit(done, total, host)
+                    if hits:
+                        self.hitsFound.emit(hits)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
             if self._abort:
                 self.finished_aborted.emit(self.query)
                 return
@@ -421,20 +444,23 @@ class AppSearchTab(QWidget):
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
+        workers = min(_SEARCH_MAX_WORKERS, len(hosts))
         if self.log_output:
             self.log_output.append_log(
-                self.tr(f"[PESQUISA] Buscando '{query}' em {len(hosts)} host(s)...")
+                self.tr(
+                    f"[PESQUISA] Buscando '{query}' em {len(hosts)} host(s) "
+                    f"({workers} threads)..."
+                )
             )
 
     def _on_progress(self, done: int, total: int, host: str) -> None:
         if not self._ui_alive():
             return
         self.progress.setMaximum(max(1, total))
-        # Avança a barra ao iniciar cada host; no fim (host vazio) usa o valor final.
-        self.progress.setValue(min(done + 1, total) if host else done)
+        self.progress.setValue(done)
         if host:
             self.progress_lbl.setText(
-                self.tr(f"Consultando {host}... ({min(done + 1, total)} de {total} hosts)")
+                self.tr(f"{done} de {total} hosts consultados — último: {host}")
             )
         else:
             self.progress_lbl.setText(self.tr(f"{done} de {total} hosts consultados"))
