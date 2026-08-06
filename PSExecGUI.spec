@@ -13,6 +13,7 @@ a = Analysis(
         'PyQt6.QtGui',
         'PyQt6.QtWidgets',
         'ui.tabs.psinfo',
+        'ui.tabs.appsearch',
         'utils.psinfo',
     ],
     hookspath=[],

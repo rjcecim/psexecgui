@@ -24,6 +24,7 @@ _MDL2_BTN_STYLE = f"""
 class FileSelectorWidget(QWidget):
     # Sinal emitido quando um arquivo ou pasta é selecionado
     fileSelected = pyqtSignal(dict)  # Emite dict: {'mode': 'file'|'folder', 'file': ..., 'folder': ...}
+    appSearchRequested = pyqtSignal()  # Abre a tela de pesquisa de aplicativos nos hosts
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,6 +49,16 @@ class FileSelectorWidget(QWidget):
         self.file_button.setFixedSize(32, 32)
         self.file_button.clicked.connect(self.open_file_dialog)
 
+        # \uE721 = Find / Search (Segoe MDL2 Assets)
+        self.search_button = QToolButton()
+        self.search_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.search_button.setText("\uE721")
+        self.search_button.setFont(_MDL2_FONT)
+        self.search_button.setStyleSheet(_MDL2_BTN_STYLE)
+        self.search_button.setToolTip(self.tr("Pesquisar aplicativos nos hosts"))
+        self.search_button.setFixedSize(32, 32)
+        self.search_button.clicked.connect(self.appSearchRequested.emit)
+
         # \uED43 = FolderOpen (Segoe MDL2 Assets)
         self.folder_button = QToolButton()
         self.folder_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -69,6 +80,7 @@ class FileSelectorWidget(QWidget):
 
         self.layout_widget.addWidget(self.icon_label)
         self.layout_widget.addWidget(self.name_label, 1)
+        self.layout_widget.addWidget(self.search_button)
         self.layout_widget.addWidget(self.file_button)
         self.layout_widget.addWidget(self.folder_button)
         self.layout_widget.addWidget(self.help_button)

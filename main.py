@@ -20,6 +20,7 @@ import tempfile
 from ui.tabs.powershell import PowerShellTab
 from ui.tabs.cmd import CmdTab
 from ui.tabs.psinfo import PsInfoTab
+from ui.tabs.appsearch import AppSearchTab
 from ui.mica import enable_mica_for_widget
 from ui.branding import APP_DISPLAY_NAME, APP_NAME, APP_VERSION, ORG_NAME, app_icon, app_mark_pixmap
 import datetime
@@ -189,6 +190,7 @@ class MainWindow(QMainWindow):
         self.log_output = LogOutputWidget()
         self.psexec_tab = PsExecTab(log_output=self.log_output)
         self.psinfo_tab = None
+        self.appsearch_tab = None
         self.msi_tab = MsiTab()
         self.robocopy_tab = RobocopyTab()
         self.powershell_tab = PowerShellTab()
@@ -239,6 +241,7 @@ class MainWindow(QMainWindow):
         
         # Conexões
         self.file_selector.fileSelected.connect(self.on_file_selected)
+        self.file_selector.appSearchRequested.connect(self.open_appsearch_tab)
         self.psexec_tab.host_edit.textChanged.connect(self.update_command)
         self.psexec_tab.openPsInfoRequested.connect(self.open_psinfo_tab)
         self.psexec_tab.openRustDeskRequested.connect(self.on_rustdesk_clicked)
@@ -526,16 +529,53 @@ class MainWindow(QMainWindow):
         self.psinfo_tab.run_psinfo()
         self._update_psinfo_mode_ui()
 
+    def open_appsearch_tab(self) -> None:
+        """Cria a aba Pesquisa de Aplicativos sob demanda e foca nela."""
+        if self.appsearch_tab is not None:
+            idx = self.tabs.indexOf(self.appsearch_tab)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
+                self._update_psinfo_mode_ui()
+                return
+
+        self.appsearch_tab = AppSearchTab(log_output=self.log_output)
+        self.appsearch_tab.uninstallRequested.connect(self._on_appsearch_uninstall)
+        self.tabs.addTab(self.appsearch_tab, self.tr("Pesquisa de Aplicativos"))
+        idx = self.tabs.indexOf(self.appsearch_tab)
+        self.tabs.tabBar().setTabData(idx, "\uE721")  # Search
+        self._refresh_tab_bar_layout()
+        self.tabs.setCurrentIndex(idx)
+        self._update_psinfo_mode_ui()
+
     def _on_psinfo_uninstall(self, remote_cmd: str, app_label: str) -> None:
-        """Abre console separado com PsExec (-h -s) para desinstalar o app remoto."""
+        """Desinstalação a partir do inventário PsInfo (host da aba PsExec)."""
         host = (self.psexec_tab.host_edit.text() or "").strip().strip("\\")
+        self._run_remote_uninstall(host, remote_cmd, app_label, log_tag="PSINFO")
+
+    def _on_appsearch_uninstall(self, host: str, remote_cmd: str, app_label: str) -> None:
+        """Desinstalação a partir da pesquisa multi-host."""
+        self._run_remote_uninstall(host, remote_cmd, app_label, log_tag="PESQUISA")
+
+    def _run_remote_uninstall(
+        self,
+        host: str,
+        remote_cmd: str,
+        app_label: str,
+        log_tag: str = "PSINFO",
+    ) -> None:
+        """Abre console separado com PsExec (-h -s) para desinstalar o app remoto."""
+        host = (host or "").strip().strip("\\")
         if not host:
-            self.log_output.append_log(self.tr("[PSINFO] Host remoto não informado para desinstalação."))
+            self.log_output.append_log(
+                self.tr(f"[{log_tag}] Host remoto não informado para desinstalação.")
+            )
             return
 
         remote_cmd = (remote_cmd or "").strip()
         if not remote_cmd:
-            self.log_output.append_log(self.tr("[PSINFO] Comando de desinstalação vazio."))
+            self.log_output.append_log(
+                self.tr(f"[{log_tag}] Comando de desinstalação vazio.")
+            )
             return
 
         psexec_exe = self._build_psexec_exe()
@@ -562,9 +602,9 @@ class MainWindow(QMainWindow):
         display_cmd = f'{psexec_exe} \\\\{host}{creds_display}{forced_flags} {remote_for_psexec}'
 
         self.log_output.append_log(
-            self.tr(f"[PSINFO] Desinstalando em {host}: {app_label}")
+            self.tr(f"[{log_tag}] Desinstalando em {host}: {app_label}")
         )
-        self.log_output.append_log(self.tr(f"[PSINFO] {display_cmd}"))
+        self.log_output.append_log(self.tr(f"[{log_tag}] {display_cmd}"))
 
         # .bat temporário: mostra acesso + comando + resultado e mantém o console aberto
         access = user if user else "(credencial atual / integrada)"
@@ -578,7 +618,7 @@ class MainWindow(QMainWindow):
             "@echo off",
             "chcp 65001 >nul",
             "echo ========================================",
-            "echo  PsInfo - Desinstalacao remota",
+            "echo  Desinstalacao remota",
             "echo ========================================",
             f"echo  Host     : \\\\{host}",
             f"echo  Acesso   : {access}",
@@ -608,20 +648,29 @@ class MainWindow(QMainWindow):
         with open(bat_path, "w", encoding="utf-8") as f:
             f.write("\r\n".join(bat_lines) + "\r\n")
 
-        subprocess.Popen(f'start "PsInfo Uninstall" cmd /k ""{bat_path}""', shell=True)
-        self.log_output.append_log(self.tr("[PSINFO] Comando aberto em terminal externo."))
+        subprocess.Popen(f'start "Uninstall" cmd /k ""{bat_path}""', shell=True)
+        self.log_output.append_log(
+            self.tr(f"[{log_tag}] Comando aberto em terminal externo.")
+        )
 
     def _on_tab_changed(self, _index: int) -> None:
-        # Se o usuário saiu da aba PsInfo, encerrá-la (remover a aba)
+        # Se o usuário saiu da aba PsInfo / Pesquisa, encerrá-la (remover a aba)
+        prev = self._last_tab_widget
+        current = self.tabs.currentWidget()
         if self.psinfo_tab is not None:
-            prev = self._last_tab_widget
-            current = self.tabs.currentWidget()
             if prev == self.psinfo_tab and current != self.psinfo_tab:
                 idx = self.tabs.indexOf(self.psinfo_tab)
                 if idx != -1:
                     self.tabs.removeTab(idx)
                 self.psinfo_tab.deleteLater()
                 self.psinfo_tab = None
+        if self.appsearch_tab is not None:
+            if prev == self.appsearch_tab and current != self.appsearch_tab:
+                idx = self.tabs.indexOf(self.appsearch_tab)
+                if idx != -1:
+                    self.tabs.removeTab(idx)
+                self.appsearch_tab.deleteLater()
+                self.appsearch_tab = None
         self._update_psinfo_mode_ui()
         self._last_tab_widget = self.tabs.currentWidget()
         # Aba PowerShell/CMD ativa muda o método de montagem do comando
@@ -652,9 +701,14 @@ class MainWindow(QMainWindow):
             self.psinfo_tab is not None
             and self.tabs.currentWidget() == self.psinfo_tab
         )
+        is_appsearch = (
+            self.appsearch_tab is not None
+            and self.tabs.currentWidget() == self.appsearch_tab
+        )
+        is_fullscreen_tab = is_psinfo or is_appsearch
 
         tabs_idx = lay.indexOf(self.tabs)
-        if is_psinfo:
+        if is_fullscreen_tab:
             if tabs_idx >= 0:
                 lay.setStretch(tabs_idx, 1)
             self.tabs.setSizePolicy(
@@ -705,14 +759,18 @@ class MainWindow(QMainWindow):
 
     def _update_psinfo_mode_ui(self) -> None:
         """
-        A aba PsInfo é uma tela de inventário; não precisa do preview do comando e log.
+        Abas de inventário/pesquisa ocupam a janela; preview, log e Run ficam ocultos.
         """
-        is_psinfo = self.psinfo_tab is not None and self.tabs.currentWidget() == self.psinfo_tab
-        self.command_preview.setVisible(not is_psinfo)
-        self.log_output.setVisible(not is_psinfo)
-        self.run_button.setVisible(not is_psinfo)
-        self.stop_button.setVisible(not is_psinfo)
-        self.restart_button.setVisible(not is_psinfo)
+        current = self.tabs.currentWidget()
+        is_fullscreen = (
+            (self.psinfo_tab is not None and current == self.psinfo_tab)
+            or (self.appsearch_tab is not None and current == self.appsearch_tab)
+        )
+        self.command_preview.setVisible(not is_fullscreen)
+        self.log_output.setVisible(not is_fullscreen)
+        self.run_button.setVisible(not is_fullscreen)
+        self.stop_button.setVisible(not is_fullscreen)
+        self.restart_button.setVisible(not is_fullscreen)
         self._redistribute_expandable_space()
 
     def _build_brand_header(self) -> QWidget:
@@ -853,22 +911,27 @@ class MainWindow(QMainWindow):
         if remote_cmd in ['cmd', 'cmd.exe']:
             show_cmd_tab = True
             cmd_by_file = False
-        # Remover abas dinâmicas, preservando PsExec e (se existir) PsInfo
+        # Remover abas dinâmicas, preservando PsExec e (se existirem) PsInfo / Pesquisa
         psinfo_widget = self.psinfo_tab
+        appsearch_widget = self.appsearch_tab
         for i in range(self.tabs.count() - 1, -1, -1):
             w = self.tabs.widget(i)
             if w is self.psexec_tab:
                 continue
             if psinfo_widget is not None and w is psinfo_widget:
                 continue
+            if appsearch_widget is not None and w is appsearch_widget:
+                continue
             self.tabs.removeTab(i)
 
-        # Índice onde os tabs dinâmicos serão inseridos (antes do PsInfo, se ele existir)
+        # Índice onde os tabs dinâmicos serão inseridos (antes de PsInfo/Pesquisa, se existirem)
         insert_at = self.tabs.count()
-        if psinfo_widget is not None:
-            idx = self.tabs.indexOf(psinfo_widget)
+        for special in (psinfo_widget, appsearch_widget):
+            if special is None:
+                continue
+            idx = self.tabs.indexOf(special)
             if idx != -1:
-                insert_at = idx
+                insert_at = min(insert_at, idx)
 
         def _insert_tab(widget, title: str, icon_char: str) -> None:
             nonlocal insert_at
