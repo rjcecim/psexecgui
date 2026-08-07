@@ -43,6 +43,7 @@ from utils.psinfo import (
     parse_disks_table,
     list_remote_installed_apps,
 )
+from utils.app_catalog import resolve_uninstall_extras
 
 
 def _icon_button(icon_char: str, tooltip: str = "", size: int = 32) -> QPushButton:
@@ -536,7 +537,7 @@ class PsInfoTab(QWidget):
                 """
             )
             if can_uninstall and isinstance(app, InstalledApp):
-                trash.setToolTip(describe_uninstall(app, ""))
+                trash.setToolTip(describe_uninstall(app, resolve_uninstall_extras(app, "")))
                 trash._installed_app = app  # type: ignore[attr-defined]
                 trash_buttons.append(trash)
                 trash.clicked.connect(lambda _checked=False, a=app: self._on_uninstall_clicked(a))
@@ -586,11 +587,12 @@ class PsInfoTab(QWidget):
         extras_lbl = make_field_label(self.tr("Parametros Extras"))
         extras_edit = QLineEdit()
         extras_edit.setPlaceholderText(
-            self.tr("EXE: ex. /S (WinRAR). MSI: ex. REBOOT=ReallySuppress")
+            self.tr("Opcional — vazio usa ApplicationCatalog.json. EXE: /S. MSI: REBOOT=ReallySuppress")
         )
         extras_edit.setToolTip(
             self.tr(
-                "Anexado ao comando padrão de cada app.\n"
+                "Se preenchido, sobrescreve o ApplicationCatalog.json.\n"
+                "Se vazio, usa uninstallArgs do catálogo quando o app for reconhecido.\n"
                 "EXE: switches do fabricante (WinRAR: /S).\n"
                 "MSI: adicionais além de /qn /norestart."
             )
@@ -603,13 +605,16 @@ class PsInfoTab(QWidget):
         self._apps_extra_params = extras_edit
 
         def refresh_trash_tooltips():
-            extras_now = (extras_edit.text() or "").strip()
+            extras_manual = (extras_edit.text() or "").strip()
             for btn in trash_buttons:
                 app_obj = getattr(btn, "_installed_app", None)
                 if isinstance(app_obj, InstalledApp):
-                    btn.setToolTip(describe_uninstall(app_obj, extras_now))
+                    btn.setToolTip(
+                        describe_uninstall(app_obj, resolve_uninstall_extras(app_obj, extras_manual))
+                    )
 
         extras_edit.textChanged.connect(lambda _t: refresh_trash_tooltips())
+        refresh_trash_tooltips()
 
         self._wire_card_download(card, "aplicativos", list(normalized))
         self._add_result_card(card, 3)
@@ -624,9 +629,10 @@ class PsInfoTab(QWidget):
                 self.log_output.append_log(self.tr("[PSINFO] Host remoto não informado."))
             return
 
-        extras = ""
+        manual = ""
         if self._apps_extra_params is not None and not sip.isdeleted(self._apps_extra_params):
-            extras = (self._apps_extra_params.text() or "").strip()
+            manual = (self._apps_extra_params.text() or "").strip()
+        extras = resolve_uninstall_extras(app, manual)
 
         try:
             remote_cmd = build_uninstall_remote_cmd(app, extras)
@@ -634,6 +640,11 @@ class PsInfoTab(QWidget):
             if self.log_output:
                 self.log_output.append_log(self.tr(f"[PSINFO] {exc}"))
             return
+
+        if extras and not manual and self.log_output:
+            self.log_output.append_log(
+                self.tr(f"[PSINFO] Parametros do catálogo para {app.display_name}: {extras}")
+            )
 
         self.uninstallRequested.emit(remote_cmd, app.display_line)
 

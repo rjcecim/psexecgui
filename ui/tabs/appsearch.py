@@ -36,6 +36,7 @@ from utils.psinfo import (
     describe_uninstall,
     list_remote_installed_apps,
 )
+from utils.app_catalog import resolve_uninstall_extras
 
 # Consultas remotas são I/O-bound; paralelizar acelera a varredura multi-host.
 _SEARCH_MAX_WORKERS = 8
@@ -256,6 +257,20 @@ class AppSearchTab(QWidget):
         self.summary_lbl.setStyleSheet("color: palette(windowText); opacity: 0.75;")
         results_card.content_layout.addWidget(self.summary_lbl, 0)
 
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(8)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText(self.tr("Buscar aplicativo..."))
+        self.filter_count_lbl = QLabel("")
+        self.filter_count_lbl.setStyleSheet("color: palette(windowText); opacity: 0.75;")
+        filter_row.addWidget(self.filter_edit)
+        filter_row.addWidget(self.filter_count_lbl)
+        filter_wrap = QWidget()
+        filter_wrap.setLayout(filter_row)
+        results_card.content_layout.addWidget(filter_wrap, 0)
+        self.filter_edit.textChanged.connect(self._apply_results_filter)
+
         self.table = QTableWidget()
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(
@@ -300,11 +315,12 @@ class AppSearchTab(QWidget):
         extras_lbl = make_field_label(self.tr("Parametros Extras"))
         self.extras_edit = QLineEdit()
         self.extras_edit.setPlaceholderText(
-            self.tr("EXE: ex. /S (WinRAR). MSI: ex. REBOOT=ReallySuppress")
+            self.tr("Opcional — vazio usa ApplicationCatalog.json. EXE: /S. MSI: REBOOT=ReallySuppress")
         )
         self.extras_edit.setToolTip(
             self.tr(
-                "Anexado ao comando padrão de cada app.\n"
+                "Se preenchido, sobrescreve o ApplicationCatalog.json.\n"
+                "Se vazio, usa uninstallArgs do catálogo quando o app for reconhecido.\n"
                 "EXE: switches do fabricante (WinRAR: /S).\n"
                 "MSI: adicionais além de /qn /norestart."
             )
@@ -423,6 +439,7 @@ class AppSearchTab(QWidget):
         self._trash_buttons = []
         self._active_query = query
         self.table.setRowCount(0)
+        self._apply_results_filter()
         self.summary_lbl.setText(self.tr("Pesquisando..."))
         self.search_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -490,6 +507,7 @@ class AppSearchTab(QWidget):
             if isinstance(hit, SearchHit):
                 self._hits.append(hit)
                 self._append_hit_row(hit)
+        self._apply_results_filter()
         self._update_summary(final=False)
 
     def _on_search_ok(self, query: str) -> None:
@@ -528,6 +546,25 @@ class AppSearchTab(QWidget):
                     f"{len(self._hits)} correspondência(s) até o momento."
                 )
             )
+
+    def _apply_results_filter(self) -> None:
+        """Filtra a tabela de resultados (mesmo padrão do PsInfo: nome/editor/versão/tipo + computador)."""
+        if not self._ui_alive():
+            return
+        q = (self.filter_edit.text() or "").strip().lower()
+        total = self.table.rowCount()
+        visible = 0
+        for r in range(total):
+            parts = []
+            for c in range(5):  # Computador, Nome, Editor, Versão, Tipo
+                it = self.table.item(r, c)
+                parts.append(it.text() if it else "")
+            text = " ".join(parts).lower()
+            ok = (q in text) if q else True
+            self.table.setRowHidden(r, not ok)
+            if ok:
+                visible += 1
+        self.filter_count_lbl.setText(self.tr(f"{visible}/{total}") if total else "")
 
     def _update_summary(self, final: bool = False, interrupted: bool = False) -> None:
         query = getattr(self, "_active_query", "") or ""
@@ -612,9 +649,7 @@ class AppSearchTab(QWidget):
             """
         )
         if can_uninstall:
-            extras_now = ""
-            if self.extras_edit is not None and not sip.isdeleted(self.extras_edit):
-                extras_now = (self.extras_edit.text() or "").strip()
+            extras_now = resolve_uninstall_extras(app, self._current_extras())
             trash.setToolTip(describe_uninstall(app, extras_now))
             trash._installed_app = app  # type: ignore[attr-defined]
             self._trash_buttons.append(trash)
@@ -640,23 +675,35 @@ class AppSearchTab(QWidget):
     def _refresh_trash_tooltips(self) -> None:
         if not self._ui_alive():
             return
-        extras_now = self._current_extras()
+        extras_manual = self._current_extras()
         for btn in list(self._trash_buttons):
             if sip.isdeleted(btn):
                 continue
             app_obj = getattr(btn, "_installed_app", None)
             if isinstance(app_obj, InstalledApp):
-                btn.setToolTip(describe_uninstall(app_obj, extras_now))
+                btn.setToolTip(
+                    describe_uninstall(
+                        app_obj, resolve_uninstall_extras(app_obj, extras_manual)
+                    )
+                )
 
     def _on_uninstall_clicked(self, hit: SearchHit) -> None:
         if not self._ui_alive():
             return
-        extras = self._current_extras()
+        manual = self._current_extras()
+        extras = resolve_uninstall_extras(hit.app, manual)
         try:
             remote_cmd = build_uninstall_remote_cmd(hit.app, extras)
         except ValueError as exc:
             if self.log_output:
                 self.log_output.append_log(self.tr(f"[PESQUISA] {exc}"))
             return
+
+        if extras and not manual and self.log_output:
+            self.log_output.append_log(
+                self.tr(
+                    f"[PESQUISA] Parametros do catálogo para {hit.app.display_name}: {extras}"
+                )
+            )
 
         self.uninstallRequested.emit(hit.host, remote_cmd, hit.app.display_line)

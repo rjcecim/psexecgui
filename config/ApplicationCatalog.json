@@ -4,8 +4,7 @@
       "displayName": "IObit Driver Booster",
       "publisher": "IObit",
       "match": [
-        "Driver Booster",
-        "Driver Booster 12"
+        "Driver Booster"
       ],
       "uninstallArgs": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
       "installerType": "Inno Setup",
@@ -15,7 +14,10 @@
     },
     {
       "displayName": "PDF24 Creator",
-      "publisher": "PDF24.org",
+      "publishers": [
+        "geek software GmbH",
+        "PDF24.org"
+      ],
       "match": [
         "PDF24 Creator"
       ],

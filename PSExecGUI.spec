@@ -7,7 +7,10 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
+    datas=[
+        ('assets', 'assets'),
+        ('config', 'config'),  # embutido no exe (+ cópia em dist/ ao final)
+    ],
     hiddenimports=[
         'PyQt6.QtCore',
         'PyQt6.QtGui',
@@ -15,6 +18,7 @@ a = Analysis(
         'ui.tabs.psinfo',
         'ui.tabs.appsearch',
         'utils.psinfo',
+        'utils.app_catalog',
     ],
     hookspath=[],
     hooksconfig={},
@@ -50,3 +54,14 @@ exe = EXE(
     entitlements_file=None,
     icon='assets/icon.ico',
 )
+
+# Copia config/ para dist/ ao lado do .exe (editável em runtime)
+import shutil
+from pathlib import Path
+
+_src_config = Path(SPECPATH) / 'config'
+_dst_config = Path(DISTPATH) / 'config'
+if _src_config.is_dir():
+    if _dst_config.exists():
+        shutil.rmtree(_dst_config)
+    shutil.copytree(_src_config, _dst_config)
