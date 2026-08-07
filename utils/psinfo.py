@@ -145,21 +145,23 @@ def _with_arch_suffix(app: InstalledApp, arch_label: str) -> InstalledApp:
     )
 
 
-def list_remote_installed_apps(host: str) -> List[InstalledApp]:
+def list_remote_installed_apps_ex(host: str) -> tuple[bool, List[InstalledApp]]:
     """
     Lista aplicativos instalados no host via Remote Registry (HKLM Uninstall),
     unindo as views 64-bit e 32-bit (Wow6432Node).
 
-    display_line no formato PsInfo: "DisplayName DisplayVersion".
+    Retorna (ok, apps):
+    - ok=False se o host estiver inacessível / ConnectRegistry falhar;
+    - ok=True com lista (possivelmente vazia) quando a conexão remoto funcionou.
     """
     h = _strip_host(host)
     if not h:
-        return []
+        return False, []
 
     try:
         root = winreg.ConnectRegistry(rf"\\{h}", winreg.HKEY_LOCAL_MACHINE)
     except OSError:
-        return []
+        return False, []
 
     try:
         apps_64 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_64KEY, "64")
@@ -191,7 +193,19 @@ def list_remote_installed_apps(host: str) -> List[InstalledApp]:
             continue
         seen.add(key)
         unique.append(app)
-    return unique
+    return True, unique
+
+
+def list_remote_installed_apps(host: str) -> List[InstalledApp]:
+    """
+    Lista aplicativos instalados no host via Remote Registry (HKLM Uninstall),
+    unindo as views 64-bit e 32-bit (Wow6432Node).
+
+    display_line no formato PsInfo: "DisplayName DisplayVersion".
+    Em falha de conexão retorna lista vazia (compatível com uso anterior).
+    """
+    _ok, apps = list_remote_installed_apps_ex(host)
+    return apps
 
 
 def extract_uninstall_executable(uninstall_string: str) -> str:

@@ -34,7 +34,7 @@ from utils.psinfo import (
     InstalledApp,
     build_uninstall_remote_cmd,
     describe_uninstall,
-    list_remote_installed_apps,
+    list_remote_installed_apps_ex,
 )
 from utils.app_catalog import resolve_uninstall_extras
 
@@ -105,7 +105,8 @@ class SearchHit:
 
 
 class _AppSearchWorker(QThread):
-    progress = pyqtSignal(int, int, str)  # done, total, último host concluído
+    # done, failed, total, último host, ok (consulta bem-sucedida)
+    progress = pyqtSignal(int, int, int, str, bool)
     hitsFound = pyqtSignal(list)  # List[SearchHit] do host recém-consultado
     finished_ok = pyqtSignal(str)  # query
     finished_aborted = pyqtSignal(str)  # query (interrupção pelo usuário)
@@ -122,17 +123,15 @@ class _AppSearchWorker(QThread):
         self._abort = True
 
     @staticmethod
-    def _scan_host(host: str, query_cf: str) -> Tuple[str, List[SearchHit]]:
-        try:
-            apps = list_remote_installed_apps(host)
-        except Exception:
-            apps = []
+    def _scan_host(host: str, query_cf: str) -> Tuple[str, List[SearchHit], bool]:
+        ok, apps = list_remote_installed_apps_ex(host)
         hits: List[SearchHit] = []
-        for app in apps:
-            name = (app.display_name or "").casefold()
-            if query_cf in name:
-                hits.append(SearchHit(host=host, app=app))
-        return host, hits
+        if ok:
+            for app in apps:
+                name = (app.display_name or "").casefold()
+                if query_cf in name:
+                    hits.append(SearchHit(host=host, app=app))
+        return host, hits, ok
 
     def run(self) -> None:
         try:
@@ -147,6 +146,7 @@ class _AppSearchWorker(QThread):
             total = len(self.hosts)
             workers = min(self.max_workers, total)
             done = 0
+            failed = 0
             executor = ThreadPoolExecutor(max_workers=workers)
             futures = {
                 executor.submit(self._scan_host, host, q): host for host in self.hosts
@@ -157,13 +157,16 @@ class _AppSearchWorker(QThread):
                         break
                     host = futures[fut]
                     try:
-                        host, hits = fut.result()
+                        host, hits, ok = fut.result()
                     except Exception:
                         hits = []
+                        ok = False
                     if self._abort:
                         break
                     done += 1
-                    self.progress.emit(done, total, host)
+                    if not ok:
+                        failed += 1
+                    self.progress.emit(done, failed, total, host, ok)
                     if hits:
                         self.hitsFound.emit(hits)
             finally:
@@ -172,7 +175,7 @@ class _AppSearchWorker(QThread):
             if self._abort:
                 self.finished_aborted.emit(self.query)
                 return
-            self.progress.emit(total, total, "")
+            self.progress.emit(total, failed, total, "", True)
             self.finished_ok.emit(self.query)
         except Exception as exc:
             self.finished_err.emit(f"Erro na pesquisa: {exc}")
@@ -191,6 +194,9 @@ class AppSearchTab(QWidget):
         self._hosts_path = ""
         self._hits: List[SearchHit] = []
         self._active_query = ""
+        self._hosts_failed = 0
+        self._hosts_done = 0
+        self._hosts_total = 0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -240,11 +246,32 @@ class AppSearchTab(QWidget):
         self.progress.setFormat("%v / %m hosts")
         self.progress.setVisible(False)
         self.progress.setFixedHeight(18)
+
+        stats_row = QHBoxLayout()
+        stats_row.setContentsMargins(0, 2, 0, 0)
+        stats_row.setSpacing(16)
+        self.ok_count_lbl = QLabel(self.tr("Sucesso: 0"))
+        self.fail_count_lbl = QLabel(self.tr("Falharam: 0"))
         self.progress_lbl = QLabel("")
-        self.progress_lbl.setStyleSheet("color: palette(windowText); opacity: 0.75;")
-        self.progress_lbl.setVisible(False)
+        for lbl in (self.ok_count_lbl, self.fail_count_lbl, self.progress_lbl):
+            lbl.setStyleSheet("color: palette(windowText); opacity: 0.85;")
+            lbl.setVisible(False)
+        self.ok_count_lbl.setStyleSheet(
+            "color: palette(highlight); font-weight: 600;"
+        )
+        self.fail_count_lbl.setStyleSheet(
+            "color: #c42b1c; font-weight: 600;"
+        )
+        stats_row.addWidget(self.ok_count_lbl)
+        stats_row.addWidget(self.fail_count_lbl)
+        stats_row.addWidget(self.progress_lbl, 1)
+        stats_wrap = QWidget()
+        stats_wrap.setLayout(stats_row)
+        self._stats_wrap = stats_wrap
+        self._stats_wrap.setVisible(False)
+
         search_card.content_layout.addWidget(self.progress)
-        search_card.content_layout.addWidget(self.progress_lbl)
+        search_card.content_layout.addWidget(self._stats_wrap)
 
         root.addWidget(search_card, 0)
 
@@ -438,6 +465,9 @@ class AppSearchTab(QWidget):
         self._hits = []
         self._trash_buttons = []
         self._active_query = query
+        self._hosts_failed = 0
+        self._hosts_done = 0
+        self._hosts_total = len(hosts)
         self.table.setRowCount(0)
         self._apply_results_filter()
         self.summary_lbl.setText(self.tr("Pesquisando..."))
@@ -446,10 +476,14 @@ class AppSearchTab(QWidget):
         self.app_edit.setEnabled(False)
         self.browse_hosts_btn.setEnabled(False)
         self.progress.setVisible(True)
+        self._stats_wrap.setVisible(True)
+        self.ok_count_lbl.setVisible(True)
+        self.fail_count_lbl.setVisible(True)
         self.progress_lbl.setVisible(True)
         self.progress.setMaximum(len(hosts))
         self.progress.setValue(0)
         self.progress.setFormat(f"%v / %m hosts")
+        self._update_live_stats(0, 0, len(hosts), "")
         self.progress_lbl.setText(self.tr("Iniciando pesquisa..."))
 
         self._worker = _AppSearchWorker(hosts, query)
@@ -470,17 +504,30 @@ class AppSearchTab(QWidget):
                 )
             )
 
-    def _on_progress(self, done: int, total: int, host: str) -> None:
-        if not self._ui_alive():
-            return
-        self.progress.setMaximum(max(1, total))
-        self.progress.setValue(done)
+    def _update_live_stats(self, done: int, failed: int, total: int, host: str = "") -> None:
+        """Atualiza contadores de sucesso/falha em tempo real."""
+        ok = max(0, done - failed)
+        self.ok_count_lbl.setText(self.tr(f"Sucesso: {ok}"))
+        self.fail_count_lbl.setText(self.tr(f"Falharam: {failed}"))
         if host:
             self.progress_lbl.setText(
-                self.tr(f"{done} de {total} hosts consultados — último: {host}")
+                self.tr(f"{done} de {total} consultados — último: {host}")
             )
+        elif done > 0:
+            self.progress_lbl.setText(self.tr(f"{done} de {total} consultados"))
         else:
-            self.progress_lbl.setText(self.tr(f"{done} de {total} hosts consultados"))
+            self.progress_lbl.setText(self.tr(f"0 de {total} consultados"))
+
+    def _on_progress(self, done: int, failed: int, total: int, host: str, _ok: bool) -> None:
+        if not self._ui_alive():
+            return
+        self._hosts_done = done
+        self._hosts_failed = failed
+        self._hosts_total = total
+        self.progress.setMaximum(max(1, total))
+        self.progress.setValue(done)
+        self._update_live_stats(done, failed, total, host)
+        self._update_summary(final=False)
 
     def _on_worker_finished(self) -> None:
         if not self._ui_alive():
@@ -494,6 +541,9 @@ class AppSearchTab(QWidget):
         if not self._ui_alive():
             return
         self.progress.setVisible(False)
+        self._stats_wrap.setVisible(True)
+        self.ok_count_lbl.setVisible(True)
+        self.fail_count_lbl.setVisible(True)
         self.progress_lbl.setVisible(True)
         self.progress_lbl.setText(self.tr(f"Falha: {msg}"))
         if self.log_output:
@@ -515,16 +565,21 @@ class AppSearchTab(QWidget):
             return
         self._active_query = query or self._active_query
         self.progress.setValue(self.progress.maximum())
+        total = self._hosts_total or self.progress.maximum()
+        failed = self._hosts_failed
+        self._update_live_stats(total, failed, total, "")
         self.progress_lbl.setText(
-            self.tr(f"Pesquisa concluída — {self.progress.maximum()} hosts consultados")
+            self.tr("Pesquisa concluída — ")
+            + self.tr(f"{total} de {total} consultados")
         )
         self._update_summary(final=True)
         computers = {h.host.casefold() for h in self._hits}
         if self.log_output:
             self.log_output.append_log(
                 self.tr(
-                    f"[PESQUISA] Concluída: {len(computers)} computador(es), "
-                    f"{len(self._hits)} correspondência(s)."
+                    f"[PESQUISA] Concluída: {len(computers)} computador(es) com app, "
+                    f"{len(self._hits)} correspondência(s), "
+                    f"{failed} host(s) falharam."
                 )
             )
 
@@ -532,18 +587,22 @@ class AppSearchTab(QWidget):
         if not self._ui_alive():
             return
         self._active_query = query or self._active_query
-        done = self.progress.value()
-        total = self.progress.maximum()
+        done = self._hosts_done or self.progress.value()
+        total = self._hosts_total or self.progress.maximum()
+        failed = self._hosts_failed
+        self._update_live_stats(done, failed, total, "")
         self.progress_lbl.setText(
-            self.tr(f"Pesquisa interrompida — {done} de {total} hosts consultados")
+            self.tr("Pesquisa interrompida — ")
+            + self.tr(f"{done} de {total} consultados")
         )
         self._update_summary(final=True, interrupted=True)
         computers = {h.host.casefold() for h in self._hits}
         if self.log_output:
             self.log_output.append_log(
                 self.tr(
-                    f"[PESQUISA] Interrompida: {len(computers)} computador(es), "
-                    f"{len(self._hits)} correspondência(s) até o momento."
+                    f"[PESQUISA] Interrompida: {len(computers)} computador(es) com app, "
+                    f"{len(self._hits)} correspondência(s), "
+                    f"{failed} host(s) falharam até o momento."
                 )
             )
 
@@ -571,6 +630,12 @@ class AppSearchTab(QWidget):
         computers = {h.host.casefold() for h in self._hits}
         count_hosts = len(computers)
         count_apps = len(self._hits)
+        failed = self._hosts_failed
+        total = self._hosts_total
+        fail_part = ""
+        if total > 0 and (failed > 0 or final or interrupted):
+            fail_part = self.tr(f" — {failed} de {total} falharam")
+
         if count_apps == 0:
             if final:
                 if interrupted:
@@ -579,13 +644,18 @@ class AppSearchTab(QWidget):
                             f"Pesquisa interrompida — nenhum computador com "
                             f"aplicativo correspondente a “{query}” até o momento."
                         )
+                        + fail_part
                     )
                 else:
                     self.summary_lbl.setText(
-                        self.tr(f"Nenhum computador com aplicativo correspondente a “{query}”.")
+                        self.tr(
+                            f"Nenhum computador com aplicativo correspondente a “{query}”."
+                        )
+                        + fail_part
                     )
             else:
-                self.summary_lbl.setText(self.tr("Pesquisando..."))
+                base = self.tr("Pesquisando...")
+                self.summary_lbl.setText(base + fail_part if fail_part else base)
             return
         if interrupted:
             prefix = self.tr("Interrompida — ")
@@ -596,8 +666,10 @@ class AppSearchTab(QWidget):
         self.summary_lbl.setText(
             self.tr(
                 f"{prefix}Aplicativo encontrado em {count_hosts} computador(es) "
-                f"({count_apps} correspondência(s) para “{query}”)."
+                f"({count_apps} correspondência(s) para “{query}”)"
             )
+            + fail_part
+            + "."
         )
 
     def _append_hit_row(self, hit: SearchHit) -> None:
