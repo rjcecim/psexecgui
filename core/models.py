@@ -1,4 +1,10 @@
-"""Modelos de domínio tipados para construção e execução de comandos."""
+"""Modelos de domínio tipados para construção e execução de comandos.
+
+Mantemos apenas tipos realmente usados pela aplicação. Opções tipadas
+(PsExecOptions, MSIOptions, etc.) foram removidas na 2ª rodada porque o
+CommandBuilder continua baseado em dicts da UI — abstrações mortas aumentavam
+dívida técnica sem benefício.
+"""
 
 from __future__ import annotations
 
@@ -19,175 +25,6 @@ class OperationStatus(str, Enum):
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
     UNKNOWN = "unknown"
-
-
-@dataclass
-class PsExecOptions:
-    host: str = ""
-    psexec_path: str = ""
-    remote_cmd: str = ""
-    user: str = ""
-    password: str = ""
-    elevate_h: bool = False
-    elevate_s: bool = False
-    elevate_l: bool = False
-    session_interactive: bool = False
-    session_id: int = 0
-    priority: str = ""
-    affinity: str = ""
-    group: str = ""
-    timeout: int = 0
-    flag_d: bool = False
-    flag_e: bool = False
-    flag_c: bool = False
-    flag_f: bool = False
-    flag_v: bool = False
-    flag_accepteula: bool = False
-    flag_nobanner: bool = False
-    extra_args: str = ""
-
-    @classmethod
-    def from_dict(cls, params: dict) -> "PsExecOptions":
-        """Compatibilidade com o dicionário legado da UI."""
-        p = params or {}
-        return cls(
-            host=str(p.get("host") or "").strip(),
-            psexec_path=str(p.get("psexec_path") or "").strip(),
-            remote_cmd=str(p.get("remote_cmd") or "").strip(),
-            user=str(p.get("user") or "").strip(),
-            password=str(p.get("password") or ""),
-            elevate_h=bool(p.get("-h")),
-            elevate_s=bool(p.get("-s")),
-            elevate_l=bool(p.get("-l")),
-            session_interactive=bool(p.get("session_interactive")),
-            session_id=int(p.get("session_id") or 0),
-            priority=str(p.get("priority") or ""),
-            affinity=str(p.get("affinity") or "").strip(),
-            group=str(p.get("group") or ""),
-            timeout=int(p.get("timeout") or 0),
-            flag_d=bool(p.get("-d")),
-            flag_e=bool(p.get("-e")),
-            flag_c=bool(p.get("-c")),
-            flag_f=bool(p.get("-f")),
-            flag_v=bool(p.get("-v")),
-            flag_accepteula=bool(p.get("-accepteula")),
-            flag_nobanner=bool(p.get("-nobanner")),
-            extra_args=str(p.get("extra_args") or "").strip(),
-        )
-
-    def to_legacy_dict(self) -> dict:
-        return {
-            "host": self.host,
-            "psexec_path": self.psexec_path,
-            "remote_cmd": self.remote_cmd,
-            "user": self.user,
-            "password": self.password,
-            "-h": self.elevate_h,
-            "-s": self.elevate_s,
-            "-l": self.elevate_l,
-            "session_interactive": self.session_interactive,
-            "session_id": self.session_id,
-            "priority": self.priority,
-            "affinity": self.affinity,
-            "group": self.group,
-            "timeout": self.timeout,
-            "-d": self.flag_d,
-            "-e": self.flag_e,
-            "-c": self.flag_c,
-            "-f": self.flag_f,
-            "-v": self.flag_v,
-            "-accepteula": self.flag_accepteula,
-            "-nobanner": self.flag_nobanner,
-            "extra_args": self.extra_args,
-        }
-
-    def clear_password(self) -> None:
-        self.password = ""
-
-
-@dataclass
-class MSIOptions:
-    enable: bool = False
-    action: str = ""
-    interface: str = ""
-    restart: str = ""
-    log: bool = False
-    log_file: str = ""
-    repair: str = ""
-    update: str = ""
-
-    @classmethod
-    def from_dict(cls, params: dict) -> "MSIOptions":
-        p = params or {}
-        return cls(
-            enable=bool(p.get("enable")),
-            action=str(p.get("action") or ""),
-            interface=str(p.get("interface") or ""),
-            restart=str(p.get("restart") or ""),
-            log=bool(p.get("log")),
-            log_file=str(p.get("log_file") or ""),
-            repair=str(p.get("repair") or ""),
-            update=str(p.get("update") or ""),
-        )
-
-
-@dataclass
-class RobocopyOptions:
-    dest: str = "Temp"
-    switches: str = "/NFL /NDL /NJH /NJS /nc /ns /np"
-
-    @classmethod
-    def from_dict(cls, params: Optional[dict]) -> Optional["RobocopyOptions"]:
-        if not params:
-            return None
-        return cls(
-            dest=str(params.get("dest") or "Temp"),
-            switches=str(params.get("switches") or "/NFL /NDL /NJH /NJS /nc /ns /np"),
-        )
-
-
-@dataclass
-class PowerShellOptions:
-    NoProfile: bool = False
-    NoExit: bool = False
-    ExecutionPolicy: str = ""
-    WindowStyle: str = ""
-    Command: str = ""
-    EncodedCommand: str = ""
-
-    @classmethod
-    def from_dict(cls, params: dict) -> "PowerShellOptions":
-        p = params or {}
-        return cls(
-            NoProfile=bool(p.get("NoProfile")),
-            NoExit=bool(p.get("NoExit")),
-            ExecutionPolicy=str(p.get("ExecutionPolicy") or ""),
-            WindowStyle=str(p.get("WindowStyle") or ""),
-            Command=str(p.get("Command") or ""),
-            EncodedCommand=str(p.get("EncodedCommand") or ""),
-        )
-
-
-@dataclass
-class CmdOptions:
-    slash_c: bool = False
-    slash_k: bool = False
-    slash_q: bool = False
-    slash_d: bool = False
-    slash_s: bool = False
-    Command: str = ""
-
-    @classmethod
-    def from_dict(cls, params: dict) -> "CmdOptions":
-        p = params or {}
-        return cls(
-            slash_c=bool(p.get("/C")),
-            slash_k=bool(p.get("/K")),
-            slash_q=bool(p.get("/Q")),
-            slash_d=bool(p.get("/D")),
-            slash_s=bool(p.get("/S")),
-            Command=str(p.get("Command") or ""),
-        )
 
 
 @dataclass
@@ -218,7 +55,9 @@ class CommandSpec:
     """
     Representação estruturada de um processo a executar.
 
-    ``args`` é a lista real para subprocess (pode conter senha).
+    ``args`` é a lista para subprocess. No fluxo PsExec via CommandBuilder,
+    a senha bruta NÃO fica no builder: o argv de preview usa placeholder e
+    a materialização ocorre na execução.
     ``display_command`` é SEMPRE sanitizado — nunca use para executar.
     """
 

@@ -45,6 +45,10 @@ from utils.psinfo import (
 )
 from utils.app_catalog import resolve_uninstall_extras
 
+# Timeout padrão para PsInfo remoto (host offline/problemático não deve travar a UI).
+# Configurável via constante; documentado em documentation.md.
+PSINFO_TIMEOUT_SECONDS = 90.0
+
 
 def _icon_button(icon_char: str, tooltip: str = "", size: int = 32) -> QPushButton:
     btn = QPushButton(icon_char)
@@ -127,12 +131,29 @@ class _PsInfoWorker(QThread):
             if hasattr(subprocess, "CREATE_NO_WINDOW"):
                 creationflags = subprocess.CREATE_NO_WINDOW
 
-            proc = subprocess.run(
-                args,
-                capture_output=True,
-                text=False,
-                creationflags=creationflags,
-            )
+            try:
+                proc = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=False,
+                    creationflags=creationflags,
+                    timeout=PSINFO_TIMEOUT_SECONDS,
+                    shell=False,
+                )
+            except subprocess.TimeoutExpired:
+                self.finished_err.emit(
+                    f"PsInfo excedeu o tempo limite ({int(PSINFO_TIMEOUT_SECONDS)}s). "
+                    "O host pode estar inacessível ou sobrecarregado."
+                )
+                return
+            except FileNotFoundError:
+                self.finished_err.emit(
+                    f"PsInfo não encontrado: {args[0] if args else '?'}."
+                )
+                return
+            except OSError as exc:
+                self.finished_err.emit(f"Falha ao iniciar PsInfo: {exc}")
+                return
 
             stdout_b = proc.stdout or b""
             stderr_b = proc.stderr or b""

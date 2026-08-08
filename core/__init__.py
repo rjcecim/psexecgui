@@ -1,1 +1,1 @@
-# Core module - Lógica principal da aplicação 
+# Core module - Lógica principal da aplicação

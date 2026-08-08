@@ -40,12 +40,12 @@ Interface moderna com identidade visual própria, preview em tempo real e abas d
 | **Cópia remota** | Robocopy integrado para enviar arquivos/pastas ao host antes de executar |
 | **Comando manual** | Digite o comando remoto (ex.: `cmd`, `powershell`) quando não houver arquivo |
 | **Preview** | Comando sanitizado (senha mascarada) atualizado em tempo real |
-| **Execução** | Terminal externo (`cmd /k` via lista de args, sem `shell=True`) |
+| **Execução** | Terminal externo (`CREATE_NEW_CONSOLE`, sem `shell=True`) |
 | **Inventário** | PsInfo remoto + Remote Registry (32/64 bits) |
 | **Busca multi-host** | Pesquisa de aplicativos em lista de hosts (`hosts.json`) |
 | **RustDesk** | Coleta ID no host e abre conexão local |
 
-Versão do aplicativo: **`1.5.0`** (`APP_VERSION` em `ui/branding.py`).
+Versão do aplicativo: **`1.5.0`** (fonte programática: `core.version.__version__`).
 
 ---
 
@@ -70,6 +70,8 @@ cd psexecgui
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e ".[dev]"
+# opcional — assets / PyInstaller:
+pip install -e ".[build]"
 ```
 
 Ou apenas runtime:
@@ -105,24 +107,28 @@ Botão **RustDesk** — obtém o ID no host (`--get-id` via PsExec `-h -s`) e ab
 
 Política central em `utils/redaction.py`:
 
-- A senha **nunca** aparece no preview, logs, `exec_history.log`, mensagens de erro ou arquivos temporários.
-- O comando real (com `-p`) só existe em memória no momento da execução.
+- Preview, logs e `exec_history.log` usam texto sanitizado (flag `-p` isolada; não mascara `-Path`/`-Profile`/`-Priority`).
+- `CommandBuilder` **não** guarda a senha bruta — apenas sabe se há senha (`has_password`) e mostra `-p ********`.
+- A senha é coletada na UI no momento da execução (`CredentialContext`), injetada no argv e desreferenciada em seguida.
 - Preferência: use a sessão Windows atual (sem `-u`/`-p`) quando possível.
 
-### Limitação inerente ao PsExec
+### Limitações honestas
 
-Quando `-u`/`-p` são necessários, o PsExec recebe a senha na linha de comando do processo. Isso é uma limitação do transporte Sysinternals — o aplicativo **não consegue eliminá-la**, apenas evita gravá-la em disco/UI/logs.
+- Com `-u`/`-p`, a senha permanece na command line do processo Windows (limitação do PsExec) — inspecionável pelo SO.
+- Strings Python não são zeroizadas criptograficamente.
+- Terminal externo: resultado remoto **não monitorado** (status `STARTED` / mensagem explícita).
 
 ---
 
 ## hosts.json
 
-Arquivo **local** (não versionar hosts reais):
+Arquivo **local** (não versionado no Git; hosts reais ficam só na máquina):
 
 1. Copie `hosts.example.json` → `hosts.json`
 2. Edite com os nomes dos computadores do seu ambiente
 
-`hosts.json` está no `.gitignore`. O arquivo de exemplo acompanha o repositório e o build.
+`hosts.json` está no `.gitignore` e **não** é rastreado (`git ls-files hosts.json` vazio).  
+`hosts.example.json` permanece versionado (somente hosts fictícios).
 
 ---
 
@@ -135,26 +141,26 @@ Histórico sanitizado em:
 
 ---
 
-## Testes
+## Qualidade (CI)
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/unit -q
 python -m compileall -q core services utils ui main.py
+ruff check core services utils main.py
 ```
 
-Testes **não** executam PsExec contra máquinas reais. CI: GitHub Actions (`windows-latest`).
+CI: GitHub Actions (`windows-latest`) — compileall + Ruff.
 
 ---
 
 ## Build
 
 ```bash
-pip install pyinstaller
+pip install -e ".[build]"
 pyinstaller PSExecGUI.spec --noconfirm
 ```
 
-Gera `dist/PSExecGUI.exe` com `assets/`, `config/` e `hosts.example.json`. **Não** empacota `hosts.json`, credenciais, logs ou testes.
+Gera `dist/PSExecGUI.exe` com `assets/`, `config/` e `hosts.example.json`. **Não** empacota `hosts.json`, credenciais ou logs.
 
 ---
 
@@ -166,8 +172,10 @@ psexecgui/
 ├── core/
 │   ├── builder.py          # CommandBuilder → CommandSpec
 │   ├── executor.py         # Executor + ExecutionResult
-│   ├── models.py           # Domain models
-│   └── win_cmd.py          # subprocess sem shell=True
+│   ├── models.py           # CommandSpec, ExecutionResult, …
+│   ├── version.py          # Fonte da versão
+│   ├── win_cmd.py          # subprocess sem shell=True
+│   └── win_cmdline.py      # CommandLineToArgvW
 ├── services/
 │   └── ops.py              # Execução, uninstall, RustDesk
 ├── utils/
@@ -178,8 +186,7 @@ psexecgui/
 │   └── hosts.py            # hosts.json
 ├── ui/                     # Abas e widgets
 ├── config/ApplicationCatalog.json
-├── hosts.example.json
-├── tests/unit/
+├── hosts.example.json      # versionado (fictício)
 ├── pyproject.toml
 └── PSExecGUI.spec
 ```

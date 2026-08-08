@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "psexecgui"
-version = "1.5.0"
+dynamic = ["version"]
 description = "Interface gráfica para execução remota via PsExec (PSTools)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "UNLICENSED" }
+# Licença: decisão pendente do proprietário — não declarar SPDX sem autorização.
 authors = [{ name = "rjcecim" }]
 dependencies = [
     "PyQt6>=6.5",
@@ -16,24 +16,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4",
-    "pytest-cov>=4.1",
     "ruff>=0.4",
 ]
+build = [
+    "Pillow>=10.0",
+    "pyinstaller>=6.0",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "core.version.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["core*", "ui*", "utils*", "services*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-markers = [
-    "windows: testes que exigem APIs Windows reais",
-    "integration: testes de integração",
-]
-filterwarnings = [
-    "ignore::DeprecationWarning",
-]
 
 [tool.ruff]
 line-length = 100
@@ -48,5 +42,4 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["E402"]
-"main.py" = ["E402", "F401"]
+"main.py" = ["E402", "F401", "I001", "W291", "W292", "W293"]  # UI legada

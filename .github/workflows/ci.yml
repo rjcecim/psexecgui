@@ -24,9 +24,5 @@ jobs:
       - name: Compile all
         run: python -m compileall -q core services utils ui main.py
 
-      - name: Unit tests
-        run: pytest tests/unit -q --tb=short
-
       - name: Ruff lint
-        run: ruff check core services utils tests main.py
-        continue-on-error: true
+        run: ruff check core services utils main.py

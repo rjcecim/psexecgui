@@ -129,6 +129,7 @@ class _AppSearchWorker(QThread):
             try:
                 for fut in as_completed(futures):
                     if self._abort:
+                        # Não processa resultados tardios na UI após interrupção.
                         break
                     host = futures[fut]
                     try:
@@ -146,6 +147,8 @@ class _AppSearchWorker(QThread):
                     if hits:
                         self.hitsFound.emit(hits)
             finally:
+                # Cancela futuros ainda não iniciados; workers Win32 já em voo
+                # podem continuar em segundo plano (limitação da API).
                 executor.shutdown(wait=False, cancel_futures=True)
 
             if self._abort:
@@ -173,6 +176,8 @@ class AppSearchTab(QWidget):
         self._hosts_failed = 0
         self._hosts_done = 0
         self._hosts_total = 0
+        # Após interrupção, ignora sinais tardios do worker antigo
+        self._accepting_search_results = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -400,15 +405,27 @@ class AppSearchTab(QWidget):
             w.deleteLater()
 
     def stop_search(self) -> None:
-        """Interrompe a pesquisa em andamento (após o host atual)."""
+        """
+        Solicita interrupção da pesquisa.
+
+        Futures ainda não iniciados são cancelados; consultas Remote Registry
+        já em andamento podem finalizar em segundo plano. Resultados tardios
+        não são mais aplicados à UI.
+        """
         w = self._worker
         if w is None or not w.isRunning():
             return
+        self._accepting_search_results = False
         w.abort()
         self.stop_btn.setEnabled(False)
         self.progress_lbl.setText(self.tr("Interrompendo pesquisa..."))
         if self.log_output:
-            self.log_output.append_log(self.tr("[PESQUISA] Interrupção solicitada pelo usuário."))
+            self.log_output.append_log(
+                self.tr(
+                    "[PESQUISA] Interrupção solicitada. "
+                    "Consultas já iniciadas podem finalizar em segundo plano."
+                )
+            )
 
     def start_search(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -447,6 +464,7 @@ class AppSearchTab(QWidget):
         self._hosts_failed = 0
         self._hosts_done = 0
         self._hosts_total = len(hosts)
+        self._accepting_search_results = True
         self.table.setRowCount(0)
         self._apply_results_filter()
         self.summary_lbl.setText(self.tr("Pesquisando..."))
@@ -500,7 +518,7 @@ class AppSearchTab(QWidget):
     def _on_progress(
         self, done: int, failed: int, total: int, host: str, _ok: bool, error_kind: str = ""
     ) -> None:
-        if not self._ui_alive():
+        if not self._ui_alive() or not self._accepting_search_results:
             return
         self._hosts_done = done
         self._hosts_failed = failed
@@ -544,7 +562,7 @@ class AppSearchTab(QWidget):
 
     def _on_hits_found(self, hits: list) -> None:
         """Exibe imediatamente as correspondências do host recém-consultado."""
-        if not self._ui_alive() or not hits:
+        if not self._ui_alive() or not self._accepting_search_results or not hits:
             return
         for hit in hits:
             if isinstance(hit, SearchHit):
@@ -579,6 +597,7 @@ class AppSearchTab(QWidget):
     def _on_search_aborted(self, query: str) -> None:
         if not self._ui_alive():
             return
+        self._accepting_search_results = False
         self._active_query = query or self._active_query
         done = self._hosts_done or self.progress.value()
         total = self._hosts_total or self.progress.maximum()
@@ -595,7 +614,8 @@ class AppSearchTab(QWidget):
                 self.tr(
                     f"[PESQUISA] Interrompida: {len(computers)} computador(es) com app, "
                     f"{len(self._hits)} correspondência(s), "
-                    f"{failed} host(s) falharam até o momento."
+                    f"{failed} host(s) falharam até o momento. "
+                    "Consultas já iniciadas podem ainda finalizar em segundo plano."
                 )
             )
 

@@ -5,17 +5,10 @@ from __future__ import annotations
 import os
 from typing import Any, List, Optional, Sequence, Union
 
-from core.models import (
-    CmdOptions,
-    CommandSpec,
-    FileSelection,
-    MSIOptions,
-    PowerShellOptions,
-    PsExecOptions,
-    RobocopyOptions,
-)
-from utils.redaction import format_argv_for_display, redact_command_text
+from core.models import CommandSpec, FileSelection
+from core.win_cmdline import split_windows_command_line
 from utils.pstools import resolve_pstools_tool
+from utils.redaction import REDACTED, format_argv_for_display, redact_command_text
 
 
 def _extract_flag_value(combo_text: str) -> str:
@@ -87,6 +80,8 @@ class CommandBuilder:
         self.selection_mode: str = "file"
         self.powershell_params: dict = {}
         self.cmd_params: dict = {}
+        # Credencial efêmera: o builder só sabe SE há senha (nunca o valor).
+        self._has_password: bool = False
 
     # ── setters (API legada preservada) ─────────────────────────────────
 
@@ -108,7 +103,26 @@ class CommandBuilder:
             self.folder_path = None
 
     def set_psexec_params(self, params: dict) -> None:
-        self.psexec_params = params or {}
+        """
+        Atualiza parâmetros operacionais do PsExec.
+
+        A chave ``password`` é consumida apenas para definir ``has_password``
+        e **não** é armazenada no estado do builder. Para preview basta o
+        placeholder ``-p ********``; a senha real só entra no argv na execução.
+        """
+        clean = dict(params or {})
+        raw_pwd = clean.pop("password", None)
+        if "has_password" in clean:
+            self._has_password = bool(clean.pop("has_password"))
+        else:
+            self._has_password = bool(str(raw_pwd or "").strip())
+        # Defesa: remover qualquer residual
+        clean.pop("password", None)
+        self.psexec_params = clean
+
+    @property
+    def has_password(self) -> bool:
+        return self._has_password
 
     def set_msi_params(self, params: dict) -> None:
         self.msi_params = params or {}
@@ -135,15 +149,9 @@ class CommandBuilder:
         self.folder_path = sel.folder
         self.selection_mode = sel.mode or "file"
 
-    def _password(self) -> str:
-        return str(self.psexec_params.get("password") or "")
-
     def _passwords_for_redaction(self) -> List[str]:
-        pwd = self._password()
-        return [pwd] if pwd.strip() else []
-
-    def _options(self) -> PsExecOptions:
-        return PsExecOptions.from_dict(self.psexec_params)
+        # Builder não guarda senha; redaction estrutural cobre -p ********.
+        return []
 
     # ── Robocopy ────────────────────────────────────────────────────────
 
@@ -240,14 +248,6 @@ class CommandBuilder:
         argv = ["robocopy", src_dir, dest_unc, "/E", *_split_extra_args(switches)]
         return CommandSpec.from_argv(argv, metadata={"kind": "robocopy"})
 
-    def _build_robocopy_file(self) -> str:
-        spec = self._build_robocopy_file_spec()
-        return spec.display_command if spec else ""
-
-    def _build_robocopy_folder(self) -> str:
-        spec = self._build_robocopy_folder_spec()
-        return spec.display_command if spec else ""
-
     # ── PsExec base ─────────────────────────────────────────────────────
 
     def _resolve_psexec_path(self) -> str:
@@ -257,13 +257,18 @@ class CommandBuilder:
             return os.path.normpath(psexec_path.replace('"', "").replace("'", ""))
         return "PsExec.exe"
 
-    def _base_psexec_argv(self, *, include_password: bool) -> List[str]:
+    def _base_psexec_argv(self, *, include_password: bool = False) -> List[str]:
         """
         Monta argv base do PsExec.
 
-        ``include_password=True`` → args reais (execução).
-        ``include_password=False`` → senha omitida/mascarada (não use para executar).
+        O builder **nunca** embute a senha bruta. Quando há senha configurada,
+        inclui ``-p ********`` para preview. A injeção do valor real ocorre
+        apenas na execução (``services.ops.materialize_password_in_argv``).
+
+        O parâmetro ``include_password`` é mantido por compatibilidade de
+        assinatura; o valor real da senha não está disponível neste objeto.
         """
+        del include_password  # senha bruta não vive no builder
         host = (self.psexec_params.get("host") or "").strip().strip("\\")
         cmd: List[str] = [self._resolve_psexec_path(), f"\\\\{host}"]
 
@@ -271,12 +276,8 @@ class CommandBuilder:
         if user:
             cmd.extend(["-u", user])
 
-        password = self._password()
-        if password.strip():
-            if include_password:
-                cmd.extend(["-p", password])
-            else:
-                cmd.extend(["-p", "********"])
+        if self._has_password:
+            cmd.extend(["-p", REDACTED])
 
         for flag in ("-h", "-s", "-l"):
             if self.psexec_params.get(flag):
@@ -319,37 +320,6 @@ class CommandBuilder:
                 cmd.append(flag)
         return cmd
 
-    def _base_psexec_cmd(self) -> List[str]:
-        """
-        Compat: retorna lista de tokens LEGADOS (alguns com flag+valor colados).
-        Preferir ``_base_psexec_argv``. Mantido para testes internos.
-        Usa senha mascarada — NÃO adequado para execução.
-        """
-        # Representação legada string-ish para join — mascarada
-        argv = self._base_psexec_argv(include_password=False)
-        # Compat visual: "-u user" como um token (comportamento antigo do join)
-        legacy: List[str] = []
-        i = 0
-        while i < len(argv):
-            a = argv[i]
-            if a in ("-u", "-p", "-a", "-g", "-n", "-i") and i + 1 < len(argv):
-                # -i pode ser sozinho
-                if a == "-i" and argv[i + 1].startswith("-"):
-                    legacy.append(a)
-                    i += 1
-                    continue
-                if a == "-i" and argv[i + 1].isdigit():
-                    legacy.append(f"-i {argv[i + 1]}")
-                    i += 2
-                    continue
-                if a != "-i":
-                    legacy.append(f"{a} {argv[i + 1]}")
-                    i += 2
-                    continue
-            legacy.append(a)
-            i += 1
-        return legacy
-
     def _remote_path_after_robocopy(self) -> Optional[str]:
         if not self.robocopy_params:
             return None
@@ -378,19 +348,22 @@ class CommandBuilder:
         *,
         append_extra: bool = True,
     ) -> CommandSpec:
-        real = self._base_psexec_argv(include_password=True)
+        # Argv com senha mascarada; materialização ocorre na execução.
+        real = self._base_psexec_argv()
         real.extend(remote_parts)
         # MSI file-mode já embute extra_args no msiexec (compat legado)
         if append_extra:
             self._append_extra_args(real)
-        passwords = self._passwords_for_redaction()
         return CommandSpec.from_argv(
             real,
-            has_secrets=bool(passwords),
-            passwords=passwords,
+            has_secrets=self._has_password,
             metadata={"kind": "psexec"},
             prefer_external_console=True,
         )
+
+    def _parse_manual_remote_cmd(self, remote_cmd: str) -> List[str]:
+        """Converte comando manual em executable + args (regras Windows)."""
+        return split_windows_command_line(remote_cmd)
 
     # ── PowerShell / CMD helpers ────────────────────────────────────────
 
@@ -460,8 +433,14 @@ class CommandBuilder:
             )
         remote_cmd = (self.psexec_params.get("remote_cmd") or "").strip()
         if (not self.file_path and not self.folder_path) and remote_cmd:
-            # Comando manual: remote_cmd pode ser string composta
-            return self._spec_from_psexec_argv([remote_cmd])
+            # Comando manual: parse Windows (CommandLineToArgvW), não um único token
+            remote_parts = self._parse_manual_remote_cmd(remote_cmd)
+            if not remote_parts:
+                return CommandSpec(
+                    executable=self._resolve_psexec_path(),
+                    display_command="# Erro: comando remoto vazio",
+                )
+            return self._spec_from_psexec_argv(remote_parts)
 
         if not self.file_path:
             return CommandSpec(
@@ -483,9 +462,6 @@ class CommandBuilder:
             return self._build_psexec_bat_script_spec()
         return self._build_psexec_other_spec()
 
-    def _build_psexec_exe(self) -> str:
-        return self._build_psexec_exe_spec().display_command
-
     def _build_psexec_exe_spec(self) -> CommandSpec:
         if not self.psexec_params:
             return CommandSpec(
@@ -502,9 +478,6 @@ class CommandBuilder:
         else:
             target = os.path.basename(self.file_path)
         return self._spec_from_psexec_argv([target])
-
-    def _build_psexec_msi(self) -> str:
-        return self._build_psexec_msi_spec().display_command
 
     def _build_psexec_msi_spec(self) -> CommandSpec:
         if not self.psexec_params:
@@ -525,9 +498,6 @@ class CommandBuilder:
         # extras já vão dentro do msiexec (comportamento legado)
         return self._spec_from_psexec_argv(msiexec_argv, append_extra=False)
 
-    def _build_psexec_ps_script(self) -> str:
-        return self._build_psexec_ps_script_spec().display_command
-
     def _build_psexec_ps_script_spec(self) -> CommandSpec:
         if not self.psexec_params:
             return CommandSpec(
@@ -537,9 +507,6 @@ class CommandBuilder:
         exec_path = self._resolve_exec_path()
         return self._spec_from_psexec_argv(self._powershell_remote_parts(exec_path))
 
-    def _build_psexec_bat_script(self) -> str:
-        return self._build_psexec_bat_script_spec().display_command
-
     def _build_psexec_bat_script_spec(self) -> CommandSpec:
         if not self.psexec_params:
             return CommandSpec(
@@ -548,9 +515,6 @@ class CommandBuilder:
             )
         exec_path = self._resolve_exec_path()
         return self._spec_from_psexec_argv(self._cmd_remote_parts(exec_path))
-
-    def _build_psexec_other(self) -> str:
-        return self._build_psexec_other_spec().display_command
 
     def _build_psexec_other_spec(self) -> CommandSpec:
         if not self.psexec_params:
@@ -568,9 +532,6 @@ class CommandBuilder:
         else:
             target = os.path.basename(self.file_path)
         return self._spec_from_psexec_argv([target])
-
-    def _build_psexec_folder(self) -> str:
-        return self._build_psexec_folder_spec().display_command
 
     def _build_psexec_folder_spec(self) -> CommandSpec:
         if not self.robocopy_params or not self.psexec_params:

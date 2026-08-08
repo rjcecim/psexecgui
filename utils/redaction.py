@@ -3,6 +3,10 @@ Política central de proteção de credenciais.
 
 Toda representação destinada a UI, logs, histórico ou arquivos temporários
 deve passar por estas funções. Não espalhe mascaramento ad-hoc pelo código.
+
+A flag de senha do PsExec é ``-p`` (ou ``/p``) **isolada**, seguida do valor.
+Argumentos como ``-Path``, ``-Profile``, ``-Priority``, ``-NoProfile`` NÃO
+são senha e não devem ser mascarados.
 """
 
 from __future__ import annotations
@@ -13,16 +17,11 @@ from typing import Iterable, Optional, Sequence
 # Marcador padrão usado em preview/logs
 REDACTED = "********"
 
-# -p / -P seguido de valor (com ou sem aspas), em linha de comando estilo PsExec
+# Apenas a flag isolada -p / -P (ou /p), com espaço ou '=', nunca "-Path" etc.
+# Lookahead negativo: após p/P não pode vir letra (evita -Path/-Profile/-Priority).
 _PASSWORD_FLAG_RE = re.compile(
-    r'(?P<prefix>(?:^|[\s"])-p(?:\s+|=))'
+    r'(?P<prefix>(?:^|[\s"])(?:-|/)p(?![A-Za-z])(?:\s+|=))'
     r'(?P<value>"[^"]*"|\'[^\']*\'|[^\s"\']+)',
-    re.IGNORECASE,
-)
-
-# Também cobre formas coladas: -psenha (raro, mas defensivo)
-_PASSWORD_GLUED_RE = re.compile(
-    r'(?P<prefix>(?:^|[\s"])-p)(?P<value>[^\s"\'-][^\s]*)',
     re.IGNORECASE,
 )
 
@@ -34,6 +33,17 @@ def mask_password(password: Optional[str], placeholder: str = REDACTED) -> str:
     return placeholder
 
 
+def _is_password_flag(arg: str) -> bool:
+    """True somente para ``-p`` / ``/p`` exatos (case-insensitive)."""
+    return arg.lower() in ("-p", "/p")
+
+
+def _is_password_flag_equals(arg: str) -> bool:
+    """True para ``-p=valor`` / ``/p=valor`` (não ``-Path=...``)."""
+    lower = arg.lower()
+    return lower.startswith("-p=") or lower.startswith("/p=")
+
+
 def redact_command_text(
     text: str,
     passwords: Optional[Iterable[str]] = None,
@@ -43,7 +53,7 @@ def redact_command_text(
     Sanitiza uma string de comando/log para exibição.
 
     1. Substitui valores explícitos de ``passwords`` (se fornecidos).
-    2. Mascara qualquer argumento ``-p`` / ``-P`` restante (defesa em profundidade).
+    2. Mascara o valor da flag ``-p`` / ``/p`` isolada (defesa em profundidade).
     """
     if not text:
         return text or ""
@@ -61,8 +71,6 @@ def redact_command_text(
         return f"{match.group('prefix')}{placeholder}"
 
     result = _PASSWORD_FLAG_RE.sub(_replace_flag, result)
-    # Só aplica glued se ainda restar -p colado sem espaço (evita re-mascarar)
-    result = _PASSWORD_GLUED_RE.sub(_replace_flag, result)
     return result
 
 
@@ -73,29 +81,26 @@ def redact_argv(
     """
     Sanitiza uma lista de argumentos (estilo subprocess).
 
-    Trata ``-p`` / ``-P`` como flag cujo próximo elemento (ou valor após ``=``)
-    é a senha.
+    Trata somente ``-p`` / ``/p`` isolados (próximo elemento = senha) ou
+    ``-p=`` / ``/p=``. Não altera ``-Path``, ``-Profile``, ``-Priority``, etc.
     """
     out: list[str] = []
     skip_next = False
-    for i, arg in enumerate(argv):
+    for arg in argv:
         if skip_next:
             out.append(placeholder)
             skip_next = False
             continue
-        lower = arg.lower()
-        if lower in ("-p", "/p"):
+        if _is_password_flag(arg):
             out.append(arg)
             skip_next = True
             continue
-        if lower.startswith("-p=") or lower.startswith("/p="):
-            out.append(f"{arg[:3]}{placeholder}" if arg[2:3] == "=" else f"-p={placeholder}")
-            continue
-        # Forma "-psenha" (sem espaço) — defensivo
-        if lower.startswith("-p") and len(arg) > 2 and arg[2] not in "=-":
-            out.append(f"-p{placeholder}")
+        if _is_password_flag_equals(arg):
+            # Preserva o prefixo "-p=" ou "/p="
+            out.append(f"{arg[:3]}{placeholder}")
             continue
         out.append(arg)
+    # Flag -p no final sem valor: não inventa placeholder extra
     return out
 
 
@@ -108,7 +113,7 @@ def quote_arg_for_display(arg: str) -> str:
     """Aspas simples para display quando há espaços (não para execução)."""
     if not arg:
         return '""'
-    if any(ch in arg for ch in (' ', '\t', '"')):
+    if any(ch in arg for ch in (" ", "\t", '"')):
         escaped = arg.replace('"', '\\"')
         return f'"{escaped}"'
     return arg

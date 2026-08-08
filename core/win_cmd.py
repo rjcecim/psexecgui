@@ -1,13 +1,15 @@
 """
 Helpers seguros para lançar processos no Windows sem shell=True.
 
-Quando cmd.exe é realmente necessário (terminal externo com /k para
-acompanhamento visual), encapsulamos aqui e documentamos o motivo.
+Estratégia de console externo:
+- Preferir ``CREATE_NEW_CONSOLE`` direto no argv do processo alvo
+  (CreateProcess recebe a lista corretamente; sem re-serialização via cmd.exe).
+- ``cmd.exe /k`` só quando explicitamente necessário; o quoting do cmd.exe
+  **não** garante round-trip seguro para credenciais com metacaracteres.
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from typing import Optional, Sequence
@@ -18,10 +20,17 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 def quote_for_cmd(arg: str) -> str:
     """
-    Aspas para cmd.exe (Windows), não regras de Unix/shlex posix.
+    Aspas para interpretação pelo ``cmd.exe`` (não regras Unix/shlex posix).
 
-    Regra: se contém espaço ou caracteres especiais do cmd, envolva em aspas
-    e dobre aspas internas.
+    Regras principais (documentação Microsoft / comportamental do cmd):
+    - Espaços e metacaracteres ``& | < > ^ ( ) % ! "`` exigem aspas.
+    - Aspas internas são dobradas (``"`` → ``""``).
+    - ``%`` e ``!`` (expansão de variáveis / delayed expansion) **não** podem
+      ser neutralizados de forma completa apenas com aspas; por isso credenciais
+      não devem passar por ``cmd /k`` quando evitável.
+
+    Esta função é útil para display e para casos sem segredos. Para execução
+    com credenciais, use ``open_external_console_argv`` (CreateProcess direto).
     """
     if not arg:
         return '""'
@@ -61,25 +70,47 @@ def popen_argv(
     )
 
 
+def open_external_console_argv(
+    argv: Sequence[str],
+    *,
+    title: str = "PSExecGUI",
+) -> subprocess.Popen:
+    """
+    Abre o processo em um console novo (CREATE_NEW_CONSOLE), sem cmd.exe.
+
+    Motivo: preservar experiência de terminal externo sem re-serializar argv
+    através das regras frágeis do ``cmd.exe /k``. Em Windows, o Python passa
+    a lista a CreateProcess com quoting compatível com CommandLineToArgvW.
+
+    Limitação de UX: a janela fecha quando o processo termina (não há ``/k``).
+    Em troca, credenciais e metacaracteres não passam por uma segunda camada
+    de parsing do CMD.
+
+    ATENÇÃO DE SEGURANÇA: com PsExec ``-p``, a senha permanece visível na
+    command line do processo (limitação inerente). Nunca grave esse argv em log.
+    """
+    del title  # reservado para futuras melhorias (SetConsoleTitle)
+    return popen_argv(list(argv), creationflags=CREATE_NEW_CONSOLE)
+
+
 def open_external_cmd_k(command_line: str, *, title: str = "PSExecGUI") -> subprocess.Popen:
     """
-    Abre um console externo com ``cmd /k <comando>``.
+    Abre ``cmd /k <comando>`` — uso restrito (sem segredos recomendado).
 
-    Motivo do uso de cmd.exe: a experiência atual do app é acompanhar a saída
-    PsExec em uma janela de terminal persistente. Não usamos shell=True;
-    invocamos cmd.exe diretamente com argumentos em lista.
-
-    ATENÇÃO DE SEGURANÇA: se ``command_line`` contiver ``-p <senha>``, a senha
-    permanece visível na linha de comando do processo (limitação inerente do
-    PsExec com credenciais explícitas). Nunca grave essa linha em log/arquivo.
+    Preferir ``open_external_console_argv`` para PsExec com credenciais.
     """
-    # cmd /k: executa e mantém a janela aberta
+    del title
     argv = ["cmd.exe", "/k", command_line]
     return popen_argv(argv, creationflags=CREATE_NEW_CONSOLE)
 
 
 def open_external_cmd_k_argv(argv: Sequence[str], *, title: str = "PSExecGUI") -> subprocess.Popen:
-    """Como open_external_cmd_k, mas a partir de argv estruturado."""
+    """
+    Compat: serializa argv para cmd /k.
+
+    Preferir ``open_external_console_argv`` quando o alvo for o próprio argv
+    (ex.: PsExec). Mantido para callers que realmente precisam de ``/k``.
+    """
     return open_external_cmd_k(argv_to_cmd_line(argv), title=title)
 
 

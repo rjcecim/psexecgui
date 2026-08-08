@@ -8,9 +8,10 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon, QPixmap
 
+from core.version import __version__ as APP_VERSION
+
 APP_NAME = "PSExecGUI"
 APP_DISPLAY_NAME = "Instalador Remoto via PsExec"
-APP_VERSION = "1.5.0"
 ORG_NAME = "PSExecGUI"
 
 # Marca: navy / azure / cyan (alinhado aos assets)

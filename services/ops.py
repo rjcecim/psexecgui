@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from core.models import CommandSpec
-from core.win_cmd import open_external_cmd_k_argv, popen_argv, quote_for_cmd
-from utils.app_logging import append_history, log_operation
+from core.models import CommandSpec, OperationStatus
+from core.win_cmd import open_external_console_argv, quote_for_cmd
+from core.win_cmdline import split_windows_command_line
+from utils.app_logging import log_operation
 from utils.pstools import resolve_pstools_tool
-from utils.redaction import redact_command_text
+from utils.redaction import REDACTED, redact_command_text
 
 
 @dataclass
@@ -22,11 +23,36 @@ class CredentialContext:
     password: str = ""
 
     def clear(self) -> None:
+        """Reduz lifetime da referência; não promete zeroização de memória."""
         self.password = ""
 
     @property
     def passwords(self) -> List[str]:
         return [self.password] if self.password.strip() else []
+
+
+def materialize_password_in_argv(
+    argv: Sequence[str],
+    password: str,
+) -> List[str]:
+    """
+    Injeta a senha real no slot ``-p <placeholder>`` do argv.
+
+    Usado somente no momento da execução. O CommandBuilder mantém apenas
+    ``********`` no estado persistente.
+    """
+    out = [str(a) for a in argv]
+    if not (password or "").strip():
+        return out
+    i = 0
+    while i < len(out):
+        if out[i].lower() == "-p" and i + 1 < len(out):
+            if out[i + 1] in (REDACTED, "********"):
+                out[i + 1] = password
+            i += 2
+            continue
+        i += 1
+    return out
 
 
 def resolve_psexec_exe(pstools_path: str) -> str:
@@ -54,7 +80,7 @@ def build_psexec_argv(
         if include_password:
             argv.extend(["-p", creds.password])
         else:
-            argv.extend(["-p", "********"])
+            argv.extend(["-p", REDACTED])
     if extra_flags:
         argv.extend(list(extra_flags))
     argv.extend(list(remote_argv))
@@ -63,10 +89,18 @@ def build_psexec_argv(
 
 @dataclass
 class LaunchResult:
+    """
+    Resultado do *lançamento* local — não do comando remoto.
+
+    Com terminal externo, o exit code do PsExec normalmente não é monitorado.
+    """
+
     ok: bool
     display_command: str
     message: str = ""
     robocopy_started: bool = False
+    status: OperationStatus = OperationStatus.UNKNOWN
+    remote_monitored: bool = False
 
 
 class CommandExecutionService:
@@ -91,15 +125,25 @@ class CommandExecutionService:
         plan: List[CommandSpec],
         *,
         passwords: Optional[Sequence[str]] = None,
+        creds: Optional[CredentialContext] = None,
     ) -> LaunchResult:
         passwords = list(passwords or [])
+        if creds and creds.password.strip() and creds.password not in passwords:
+            passwords.append(creds.password)
+        password = passwords[0] if passwords else ""
+
         if not plan:
-            return LaunchResult(ok=False, display_command="", message="Nenhum comando")
+            return LaunchResult(
+                ok=False,
+                display_command="",
+                message="Nenhum comando",
+                status=OperationStatus.FAILED,
+            )
 
         displays = [s.sanitized_display(passwords) for s in plan]
         full_display = "\n".join(d for d in displays if d)
         self._log(f"[DEBUG] Comando completo: {full_display}")
-        append_history(full_display, passwords=passwords)
+        # Única gravação no histórico para esta operação
         log_operation("execute", detail=full_display, passwords=passwords)
 
         robocopy_specs = [
@@ -124,8 +168,8 @@ class CommandExecutionService:
                     self._log(
                         f"Robocopy OK (código {exit_code}). Iniciando PsExec..."
                     )
-                    self._launch_external_psexec(px)
-                    self._log("Comando executado em terminal externo.")
+                    launch = self._launch_external_psexec(px, password=password)
+                    self._log(launch.message)
                 else:
                     self._log(
                         f"Robocopy falhou (código {exit_code}). "
@@ -142,26 +186,67 @@ class CommandExecutionService:
                 ok=True,
                 display_command=full_display,
                 robocopy_started=True,
-                message="Robocopy iniciado",
+                message="Robocopy iniciado; PsExec pendente do resultado da cópia.",
+                status=OperationStatus.STARTED,
+                remote_monitored=False,
             )
 
         target = psexec_specs[0] if psexec_specs else plan[-1]
-        self._launch_external_psexec(target)
-        self._log("Comando executado em terminal externo.")
+        launch = self._launch_external_psexec(target, password=password)
+        self._log(launch.message)
         if self._run_enabled_cb:
             self._run_enabled_cb(True)
         if self._stop_enabled_cb:
             self._stop_enabled_cb(False)
-        return LaunchResult(ok=True, display_command=full_display)
+        return LaunchResult(
+            ok=launch.ok,
+            display_command=full_display,
+            message=launch.message,
+            status=launch.status,
+            remote_monitored=False,
+        )
 
-    def _launch_external_psexec(self, spec: CommandSpec) -> None:
+    def _launch_external_psexec(
+        self, spec: CommandSpec, *, password: str = ""
+    ) -> LaunchResult:
         """
         Abre console externo com o comando PsExec.
 
         Limitação inerente ao PsExec: com ``-p``, a senha fica na command line
         do processo. Não é gravada em arquivo, preview ou log.
+
+        O resultado remoto NÃO é monitorado (console externo independente).
         """
-        open_external_cmd_k_argv(spec.argv)
+        argv = materialize_password_in_argv(spec.argv, password)
+        try:
+            open_external_console_argv(argv)
+        except FileNotFoundError:
+            msg = f"Falha ao lançar: executável não encontrado ({argv[0] if argv else '?'})."
+            return LaunchResult(
+                ok=False,
+                display_command=spec.display_command,
+                message=msg,
+                status=OperationStatus.FAILED,
+            )
+        except OSError as exc:
+            safe = redact_command_text(str(exc), passwords=[password] if password else None)
+            msg = f"Falha ao lançar processo: {safe}"
+            return LaunchResult(
+                ok=False,
+                display_command=spec.display_command,
+                message=msg,
+                status=OperationStatus.FAILED,
+            )
+        return LaunchResult(
+            ok=True,
+            display_command=spec.display_command,
+            message=(
+                "Execução iniciada em terminal externo; "
+                "resultado remoto não monitorado."
+            ),
+            status=OperationStatus.STARTED,
+            remote_monitored=False,
+        )
 
 
 @dataclass
@@ -169,6 +254,7 @@ class UninstallLaunchResult:
     ok: bool
     display_command: str
     message: str = ""
+    status: OperationStatus = OperationStatus.UNKNOWN
 
 
 class RemoteUninstallService:
@@ -195,18 +281,24 @@ class RemoteUninstallService:
         if not host:
             msg = f"[{log_tag}] Host remoto não informado para desinstalação."
             log(msg)
-            return UninstallLaunchResult(ok=False, display_command="", message=msg)
+            return UninstallLaunchResult(
+                ok=False, display_command="", message=msg, status=OperationStatus.FAILED
+            )
         if not remote_cmd:
             msg = f"[{log_tag}] Comando de desinstalação vazio."
             log(msg)
-            return UninstallLaunchResult(ok=False, display_command="", message=msg)
+            return UninstallLaunchResult(
+                ok=False, display_command="", message=msg, status=OperationStatus.FAILED
+            )
 
         psexec_exe = resolve_psexec_exe(pstools_path)
 
-        if not remote_cmd.lower().lstrip().startswith("cmd "):
-            remote_argv: List[str] = ["cmd", "/c", remote_cmd]
+        # Sempre parse Windows; se não for cmd explícito, envolve com cmd /c
+        low = remote_cmd.lower().lstrip()
+        if low.startswith("cmd ") or low.startswith("cmd.exe"):
+            remote_argv = split_windows_command_line(remote_cmd)
         else:
-            remote_argv = [remote_cmd]
+            remote_argv = ["cmd", "/c", remote_cmd]
 
         extra_flags = ["-h", "-s", "-accepteula", "-nobanner"]
         real_argv = build_psexec_argv(
@@ -232,20 +324,30 @@ class RemoteUninstallService:
 
         log(f"[{log_tag}] Desinstalando em {host}: {app_label}")
         log(f"[{log_tag}] {display_cmd}")
-        append_history(display_cmd, passwords=creds.passwords)
+        log_operation("uninstall", detail=display_cmd, passwords=creds.passwords)
 
         try:
-            open_external_cmd_k_argv(real_argv)
-            log(f"[{log_tag}] Comando aberto em terminal externo.")
+            open_external_console_argv(real_argv)
+            msg = (
+                f"[{log_tag}] Execução iniciada em terminal externo; "
+                "resultado remoto não monitorado."
+            )
+            log(msg)
             return UninstallLaunchResult(
-                ok=True, display_command=display_cmd, message="ok"
+                ok=True,
+                display_command=display_cmd,
+                message=msg,
+                status=OperationStatus.STARTED,
             )
         except OSError as exc:
             safe = redact_command_text(str(exc), passwords=creds.passwords)
             msg = f"[{log_tag}] Falha ao abrir terminal: {safe}"
             log(msg)
             return UninstallLaunchResult(
-                ok=False, display_command=display_cmd, message=msg
+                ok=False,
+                display_command=display_cmd,
+                message=msg,
+                status=OperationStatus.FAILED,
             )
 
 
@@ -323,6 +425,8 @@ class RustDeskService:
         return "rustdesk.exe"
 
     def open_local_connect(self, rustdesk_id: str) -> Tuple[bool, str]:
+        from core.win_cmd import popen_argv
+
         local_exe = self.find_local_rustdesk()
         try:
             popen_argv([local_exe, "--connect", rustdesk_id])

@@ -987,9 +987,6 @@ class MainWindow(QMainWindow):
         else:
             file_selection = None
         robocopy_enabled = self.should_enable_robocopy()
-        # NOVO: Detectar extensão
-        ext = selection.lower().split('.')[-1] if selection and '.' in selection else ''
-        remote_cmd = self.psexec_tab.remote_cmd_edit.text().strip().lower()
         # --- CORREÇÃO: Sempre preservar parâmetros da aba PowerShell se ela existir ---
         if hasattr(self, 'powershell_tab') and self.powershell_tab:
             self.command_builder.set_powershell_params(self.powershell_tab.get_params())
@@ -1008,13 +1005,13 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             self.psexec_tab.remote_cmd_edit.repaint()
             self._updating_remote_cmd = False
-            robocopy_dest = self.robocopy_tab.dest_edit.text() or 'C:\\Temp'
             psexec_params = {
                 'host': self.psexec_tab.host_edit.text(),
                 'psexec_path': self.psexec_tab.psexec_path_edit.text(),
                 'remote_cmd': self.psexec_tab.remote_cmd_edit.text(),
                 'user': self.psexec_tab.user_edit.text(),
-                'password': self.psexec_tab.pass_edit.text(),
+                # Senha NÃO persiste no CommandBuilder — só presença para preview
+                'has_password': bool((self.psexec_tab.pass_edit.text() or "").strip()),
                 '-h': self.psexec_tab.flag_h.isChecked(),
                 '-s': self.psexec_tab.flag_s.isChecked(),
                 '-l': self.psexec_tab.flag_l.isChecked(),
@@ -1046,7 +1043,8 @@ class MainWindow(QMainWindow):
                 'psexec_path': self.psexec_tab.psexec_path_edit.text(),
                 'remote_cmd': self.psexec_tab.remote_cmd_edit.text(),
                 'user': self.psexec_tab.user_edit.text(),
-                'password': self.psexec_tab.pass_edit.text(),
+                # Senha NÃO persiste no CommandBuilder — só presença para preview
+                'has_password': bool((self.psexec_tab.pass_edit.text() or "").strip()),
                 '-h': self.psexec_tab.flag_h.isChecked(),
                 '-s': self.psexec_tab.flag_s.isChecked(),
                 '-l': self.psexec_tab.flag_l.isChecked(),
@@ -1079,10 +1077,8 @@ class MainWindow(QMainWindow):
 
     def on_run(self):
         self.update_command()
-        passwords = []
-        pwd = self.psexec_tab.pass_edit.text() or ""
-        if pwd.strip():
-            passwords.append(pwd)
+        # Credencial efêmera: coletada só na execução; limpa após o lançamento.
+        creds = self._current_creds()
 
         self.log_output.clear_log()
         self.run_button.setEnabled(False)
@@ -1093,12 +1089,19 @@ class MainWindow(QMainWindow):
             self.log_output.append_log(self.tr("Nenhum comando para executar."))
             self.run_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            creds.clear()
             return
 
-        result = self._execution_service.launch_plan(plan, passwords=passwords)
-        if not result.robocopy_started and not result.ok:
-            self.run_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
+        try:
+            result = self._execution_service.launch_plan(
+                plan, passwords=creds.passwords, creds=creds
+            )
+            # Mensagem de status já vai ao log via log_fn do serviço
+            if not result.robocopy_started and not result.ok:
+                self.run_button.setEnabled(True)
+                self.stop_button.setEnabled(False)
+        finally:
+            creds.clear()
 
     def on_stop(self):
         self.executor.stop()
@@ -1135,8 +1138,6 @@ class MainWindow(QMainWindow):
 
     def on_restart(self):
         """Reinicia o aplicativo completamente."""
-        import os
-        import sys
         python = sys.executable
         os.execl(python, python, *sys.argv)
 

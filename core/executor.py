@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from typing import List, Optional, Sequence, Union
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
-from concurrent.futures import ThreadPoolExecutor, Future
 
 from core.models import CommandSpec, ExecutionResult, OperationStatus, is_robocopy_success
 from core.win_cmd import CREATE_NO_WINDOW, popen_argv
@@ -55,8 +55,10 @@ class Executor(QObject):
     """
     Executa um comando em ThreadPoolExecutor (1 worker) e emite sinais Qt.
 
-    Aceita ``str`` (legado, via shell=False + cmd quando necessário) ou
-    ``CommandSpec`` / lista de argv.
+    Aceita ``CommandSpec`` / lista de argv (preferido) ou ``str`` legada.
+
+    Serializado: uma execução por vez. ``run()`` solicita cancelamento da
+    anterior; resultados obsoletos são descartados via ``_run_generation``.
 
     Cancelamento: encerra apenas o processo LOCAL. Processos remotos iniciados
     via PsExec podem continuar — ``ExecutionResult.remote_may_continue=True``.
@@ -75,6 +77,8 @@ class Executor(QObject):
         self._cancel_requested = False
         self._last_result: Optional[ExecutionResult] = None
         self._passwords: List[str] = []
+        self._run_generation = 0
+        self._lock = threading.Lock()
 
     def run(
         self,
@@ -84,10 +88,15 @@ class Executor(QObject):
         timeout: Optional[float] = None,
     ) -> None:
         self.stop()
-        self._cancel_requested = False
-        self._passwords = [p for p in (passwords or []) if p]
-        self.future = self.executor.submit(self._run_command, command, timeout)
-        QTimer.singleShot(100, self._check_future)
+        with self._lock:
+            self._cancel_requested = False
+            self._run_generation += 1
+            generation = self._run_generation
+            self._passwords = [p for p in (passwords or []) if p]
+            self.future = self.executor.submit(
+                self._run_command, command, timeout, generation
+            )
+        QTimer.singleShot(100, lambda: self._check_future(generation))
 
     def _normalize_argv(
         self, command: Union[str, CommandSpec, Sequence[str]]
@@ -95,8 +104,7 @@ class Executor(QObject):
         """
         Retorna (argv, is_robocopy, display_safe).
 
-        Strings legadas (ex.: robocopy "src" "dst" file) são convertidas via
-        cmd.exe /c apenas quando necessário — documentado.
+        Strings legadas são convertidas via cmd.exe /c apenas quando necessário.
         """
         if isinstance(command, CommandSpec):
             argv = command.argv
@@ -112,12 +120,9 @@ class Executor(QObject):
             display = redact_command_text(" ".join(argv), passwords=self._passwords)
             return argv, is_rc, display
 
-        # string legada
         text = str(command or "").strip()
         display = redact_command_text(text, passwords=self._passwords)
         is_rc = text.lower().lstrip().startswith("robocopy")
-        # Usar cmd /c para strings legadas com quoting complexo do Windows.
-        # Motivo: robocopy/paths com aspas já montados como string pela UI antiga.
         argv = ["cmd.exe", "/c", text]
         return argv, is_rc, display
 
@@ -125,13 +130,16 @@ class Executor(QObject):
         self,
         command: Union[str, CommandSpec, Sequence[str]],
         timeout: Optional[float],
+        generation: int,
     ) -> ExecutionResult:
         result = ExecutionResult(
             started_at=datetime.now(),
             status=OperationStatus.STARTED,
         )
+        result.metadata["run_generation"] = generation
         stdout_acc: List[str] = []
         stderr_acc: List[str] = []
+        proc: Optional[subprocess.Popen] = None
 
         try:
             argv, is_robocopy, _display = self._normalize_argv(command)
@@ -152,13 +160,13 @@ class Executor(QObject):
                 self.errorReceived.emit(line)
 
             try:
-                self.process = popen_argv(
+                proc = popen_argv(
                     argv,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     creationflags=creationflags,
                 )
-            except FileNotFoundError as exc:
+            except FileNotFoundError:
                 msg = f"Executável não encontrado: {argv[0]}"
                 self.errorReceived.emit(msg)
                 result.exception = msg
@@ -172,16 +180,32 @@ class Executor(QObject):
                 result.return_code = 1
                 return result.finalize()
 
+            with self._lock:
+                if generation != self._run_generation:
+                    # Execução substituída antes de publicar o handle
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    result.cancelled = True
+                    result.remote_may_continue = True
+                    return result.finalize()
+                self.process = proc
+
+            # Threads leem handles estáveis do Popen local (não self.process)
+            stdout_pipe = proc.stdout
+            stderr_pipe = proc.stderr
+
             t_out = threading.Thread(
                 target=lambda: _read_pipe(
-                    self.process.stdout,
+                    stdout_pipe,
                     lambda ln: on_out(f"{prefix}{ln}" if prefix else ln),
                 ),
                 daemon=True,
             )
             t_err = threading.Thread(
                 target=lambda: _read_pipe(
-                    self.process.stderr,
+                    stderr_pipe,
                     lambda ln: on_err(f"{prefix}{ln}" if prefix else ln),
                 ),
                 daemon=True,
@@ -190,29 +214,34 @@ class Executor(QObject):
             t_err.start()
 
             try:
-                self.process.wait(timeout=timeout)
+                proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 result.timed_out = True
                 result.remote_may_continue = True
                 try:
-                    self.process.kill()
+                    proc.kill()
                 except Exception:
                     pass
-                self.process.wait(timeout=5)
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
 
             t_out.join(timeout=5)
             t_err.join(timeout=5)
 
-            if self._cancel_requested:
+            if self._cancel_requested and generation == self._run_generation:
                 result.cancelled = True
                 result.remote_may_continue = True
 
-            result.return_code = self.process.returncode
+            result.return_code = proc.returncode
             result.stdout = "\n".join(stdout_acc)
             result.stderr = "\n".join(stderr_acc)
 
             if is_robocopy and result.return_code is not None:
-                result.metadata["robocopy_success"] = is_robocopy_success(result.return_code)
+                result.metadata["robocopy_success"] = is_robocopy_success(
+                    result.return_code
+                )
                 if is_robocopy_success(result.return_code):
                     result.success = True
                     result.status = OperationStatus.COMPLETED
@@ -237,22 +266,32 @@ class Executor(QObject):
                 result.duration_seconds = (
                     result.finished_at - result.started_at
                 ).total_seconds()
-            self.process = None
-            self._last_result = result
+            with self._lock:
+                if self.process is proc:
+                    self.process = None
+                if generation == self._run_generation:
+                    self._last_result = result
 
-    def _check_future(self) -> None:
-        if self.future is None:
+    def _check_future(self, generation: int) -> None:
+        with self._lock:
+            fut = self.future
+            current_gen = self._run_generation
+        if fut is None or generation != current_gen:
             return
-        if self.future.done():
+        if fut.done():
             try:
-                result = self.future.result()
+                result = fut.result()
                 if not isinstance(result, ExecutionResult):
-                    # compat: future retornou int
                     code = int(result) if result is not None else 1
                     result = ExecutionResult(return_code=code).finalize()
+                # Descartar resultado de geração antiga
+                if result.metadata.get("run_generation") != current_gen:
+                    return
                 self._last_result = result
                 self.resultReady.emit(result)
-                self.finished.emit(result.return_code if result.return_code is not None else 1)
+                self.finished.emit(
+                    result.return_code if result.return_code is not None else 1
+                )
             except Exception as e:
                 safe = redact_command_text(str(e), passwords=self._passwords)
                 self.errorReceived.emit(safe)
@@ -263,9 +302,11 @@ class Executor(QObject):
                 )
                 self.resultReady.emit(result)
                 self.finished.emit(1)
-            self.future = None
+            with self._lock:
+                if self.future is fut:
+                    self.future = None
         else:
-            QTimer.singleShot(100, self._check_future)
+            QTimer.singleShot(100, lambda: self._check_future(generation))
 
     def stop(self) -> None:
         """
@@ -275,20 +316,23 @@ class Executor(QObject):
         o processo remoto pode continuar. O resultado marca
         ``remote_may_continue=True``.
         """
-        self._cancel_requested = True
-        if self.process and self.process.poll() is None:
+        with self._lock:
+            self._cancel_requested = True
+            proc = self.process
+            fut = self.future
+        if proc is not None and proc.poll() is None:
             try:
-                self.process.terminate()
+                proc.terminate()
             except Exception:
                 pass
             try:
-                self.process.kill()
+                proc.kill()
             except Exception:
                 pass
-        self.process = None
-        if self.future:
-            self.future.cancel()
-            self.future = None
+        # Não zera self.process aqui — a thread dona do Popen limpa no finally.
+        # Cancela apenas futures ainda não iniciados.
+        if fut is not None and not fut.running() and not fut.done():
+            fut.cancel()
 
     @property
     def last_result(self) -> Optional[ExecutionResult]:

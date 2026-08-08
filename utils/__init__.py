@@ -1,1 +1,1 @@
-# Utils module - Utilitários e helpers 
+# Utils module - Utilitários e helpers
