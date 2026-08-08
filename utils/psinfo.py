@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import re
 import shlex
-import winreg
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -41,8 +40,29 @@ class InstalledApp:
     arch: str  # "64" | "32"
 
 
-_GUID_RE = re.compile(r"\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}")
+@dataclass
+class HostInventoryStatus:
+    """Resultado tipado da consulta de inventário remoto via Remote Registry."""
+
+    host: str
+    ok: bool
+    apps: List[InstalledApp] = field(default_factory=list)
+    # "": sucesso; invalid_host | unreachable | auth | remote_registry
+    error_kind: str = ""
+    message: str = ""
+
+
+_GUID_RE = re.compile(
+    r"\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}"
+)
 _UNINSTALL_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+
+# Win32 codes usados para classificar falhas de ConnectRegistry / Remote Registry
+_AUTH_WINERRORS = frozenset({5, 86, 1326, 1327, 1330, 1789, 2202})
+_UNREACHABLE_WINERRORS = frozenset(
+    {51, 53, 64, 67, 1231, 10051, 10060, 10061, 10065}
+)
+_REMOTE_REGISTRY_WINERRORS = frozenset({1707, 1722, 1753})
 
 
 def _strip_host(host: str) -> str:
@@ -57,6 +77,8 @@ def build_psinfo_target(host: str) -> str:
 
 
 def _reg_str(sub, value_name: str) -> str:
+    import winreg
+
     try:
         value, _ = winreg.QueryValueEx(sub, value_name)
         text = str(value or "").strip()
@@ -78,9 +100,28 @@ def _detect_msi(sub_key: str, uninstall_string: str) -> tuple[bool, str]:
     return False, ""
 
 
-def _apps_from_uninstall(root, access: int, arch: str) -> Dict[str, InstalledApp]:
-    """Retorna {DisplayName: InstalledApp} para a view indicada."""
-    apps: Dict[str, InstalledApp] = {}
+def _app_identity_key(app: InstalledApp) -> Tuple[str, str, str]:
+    return (
+        (app.display_name or "").casefold(),
+        (app.version or "").casefold(),
+        (app.publisher or "").casefold(),
+    )
+
+
+def _dedup_key(app: InstalledApp) -> Tuple:
+    """Chave de deduplicação: product_code (MSI) ou (nome, versão, publisher, arch)."""
+    pc = (app.product_code or "").strip()
+    if pc:
+        return ("pc", pc.casefold())
+    return ("nvpa",) + _app_identity_key(app) + ((app.arch or "").casefold(),)
+
+
+def _apps_from_uninstall(root, access: int, arch: str) -> List[InstalledApp]:
+    """Lê a view Uninstall indicada; deduplica por product_code ou (nome, versão, publisher, arch)."""
+    import winreg
+
+    apps: List[InstalledApp] = []
+    seen: Dict[Tuple, InstalledApp] = {}
     try:
         uninstall = winreg.OpenKey(root, _UNINSTALL_KEY, 0, access)
     except OSError:
@@ -115,14 +156,19 @@ def _apps_from_uninstall(root, access: int, arch: str) -> Dict[str, InstalledApp
                         is_msi=is_msi,
                         arch=arch,
                     )
-                    prev = apps.get(name)
+                    key = _dedup_key(app)
+                    prev = seen.get(key)
+                    # Preferir entrada que já tem versão preenchida
                     if prev is None or (version and not prev.version):
-                        apps[name] = app
+                        seen[key] = app
             except OSError:
                 continue
     finally:
-        uninstall.Close()
-    return apps
+        try:
+            uninstall.Close()
+        except OSError:
+            pass
+    return list(seen.values())
 
 
 def _with_arch_suffix(app: InstalledApp, arch_label: str) -> InstalledApp:
@@ -145,6 +191,129 @@ def _with_arch_suffix(app: InstalledApp, arch_label: str) -> InstalledApp:
     )
 
 
+def _merge_arch_views(apps_64: List[InstalledApp], apps_32: List[InstalledApp]) -> List[InstalledApp]:
+    """
+    Une views 64/32:
+    - com product_code: uma entrada (preferência 64);
+    - sem product_code: (nome, versão, publisher) em ambas as views → manter ambas com sufixo;
+    - demais: manter como estão.
+    """
+    by_pc: Dict[str, InstalledApp] = {}
+    for app in apps_64:
+        pc = (app.product_code or "").strip()
+        if pc:
+            by_pc[pc.casefold()] = app
+    for app in apps_32:
+        pc = (app.product_code or "").strip()
+        if pc:
+            key = pc.casefold()
+            if key not in by_pc:
+                by_pc[key] = app
+
+    non_64 = [a for a in apps_64 if not (a.product_code or "").strip()]
+    non_32 = [a for a in apps_32 if not (a.product_code or "").strip()]
+
+    map_64: Dict[Tuple[str, str, str], InstalledApp] = {}
+    for app in non_64:
+        map_64[_app_identity_key(app)] = app
+    map_32: Dict[Tuple[str, str, str], InstalledApp] = {}
+    for app in non_32:
+        map_32[_app_identity_key(app)] = app
+
+    keys_64 = set(map_64)
+    keys_32 = set(map_32)
+
+    out: List[InstalledApp] = list(by_pc.values())
+    for k in keys_64 - keys_32:
+        out.append(map_64[k])
+    for k in keys_32 - keys_64:
+        out.append(map_32[k])
+    for k in keys_64 & keys_32:
+        out.append(_with_arch_suffix(map_64[k], "64-bit"))
+        out.append(_with_arch_suffix(map_32[k], "32-bit"))
+
+    # Dedup final estável (product_code / uninstall + linha + arch)
+    seen: set[tuple[str, str, str]] = set()
+    unique: List[InstalledApp] = []
+    for app in sorted(out, key=lambda a: a.display_line.casefold()):
+        key = (
+            app.display_line.casefold(),
+            app.arch,
+            app.product_code or app.uninstall_string,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(app)
+    return unique
+
+
+def _winerror_code(exc: BaseException) -> Optional[int]:
+    winerror = getattr(exc, "winerror", None)
+    if isinstance(winerror, int):
+        return winerror
+    errno = getattr(exc, "errno", None)
+    if isinstance(errno, int):
+        return errno
+    return None
+
+
+def _classify_connect_error(exc: OSError) -> Tuple[str, str]:
+    """Mapeia OSError do ConnectRegistry para error_kind + mensagem curta."""
+    code = _winerror_code(exc)
+    detail = str(exc).strip() or (f"WinError {code}" if code is not None else "erro de registro remoto")
+
+    if code in _AUTH_WINERRORS:
+        return "auth", detail
+    if code in _UNREACHABLE_WINERRORS:
+        return "unreachable", detail
+    if code in _REMOTE_REGISTRY_WINERRORS:
+        return "remote_registry", detail
+    # Falhas de conexão remota sem código conhecido: tratar como Remote Registry / RPC
+    return "remote_registry", detail
+
+
+def list_remote_installed_apps_status(host: str) -> HostInventoryStatus:
+    """
+    Lista aplicativos instalados no host via Remote Registry (HKLM Uninstall),
+    unindo as views 64-bit e 32-bit (Wow6432Node), com classificação de erro.
+    """
+    import winreg
+
+    h = _strip_host(host)
+    if not h:
+        return HostInventoryStatus(
+            host="",
+            ok=False,
+            apps=[],
+            error_kind="invalid_host",
+            message="Host inválido ou vazio.",
+        )
+
+    try:
+        root = winreg.ConnectRegistry(rf"\\{h}", winreg.HKEY_LOCAL_MACHINE)
+    except OSError as exc:
+        kind, msg = _classify_connect_error(exc)
+        return HostInventoryStatus(host=h, ok=False, apps=[], error_kind=kind, message=msg)
+
+    try:
+        apps_64 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_64KEY, "64")
+        apps_32 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_32KEY, "32")
+    finally:
+        try:
+            root.Close()
+        except OSError:
+            pass
+
+    return HostInventoryStatus(
+        host=h,
+        ok=True,
+        apps=_merge_arch_views(apps_64, apps_32),
+        error_kind="",
+        message="",
+    )
+
+
 def list_remote_installed_apps_ex(host: str) -> tuple[bool, List[InstalledApp]]:
     """
     Lista aplicativos instalados no host via Remote Registry (HKLM Uninstall),
@@ -154,46 +323,8 @@ def list_remote_installed_apps_ex(host: str) -> tuple[bool, List[InstalledApp]]:
     - ok=False se o host estiver inacessível / ConnectRegistry falhar;
     - ok=True com lista (possivelmente vazia) quando a conexão remoto funcionou.
     """
-    h = _strip_host(host)
-    if not h:
-        return False, []
-
-    try:
-        root = winreg.ConnectRegistry(rf"\\{h}", winreg.HKEY_LOCAL_MACHINE)
-    except OSError:
-        return False, []
-
-    try:
-        apps_64 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_64KEY, "64")
-        apps_32 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_32KEY, "32")
-    finally:
-        root.Close()
-
-    names_64 = set(apps_64)
-    names_32 = set(apps_32)
-    only_64 = names_64 - names_32
-    only_32 = names_32 - names_64
-    both = names_64 & names_32
-
-    out: List[InstalledApp] = []
-    for n in only_64:
-        out.append(apps_64[n])
-    for n in only_32:
-        out.append(apps_32[n])
-    for n in both:
-        out.append(_with_arch_suffix(apps_64[n], "64-bit"))
-        out.append(_with_arch_suffix(apps_32[n], "32-bit"))
-
-    # Dedup por (display_line, arch, product_code/uninstall) — manter ordem estável
-    seen: set[tuple[str, str, str]] = set()
-    unique: List[InstalledApp] = []
-    for app in sorted(out, key=lambda a: a.display_line.casefold()):
-        key = (app.display_line.casefold(), app.arch, app.product_code or app.uninstall_string)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(app)
-    return True, unique
+    status = list_remote_installed_apps_status(host)
+    return status.ok, status.apps
 
 
 def list_remote_installed_apps(host: str) -> List[InstalledApp]:

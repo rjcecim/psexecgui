@@ -474,14 +474,19 @@ class PsExecTab(QWidget):
             self.psexec_path_edit.setText(folder)
 
     def ping_host(self):
-        import subprocess
         host = self.host_edit.text().strip()
         if not host:
             if self.log_output:
                 self.log_output.append_log(self.tr("[PING] Por favor, insira um host para ping."))
             return
+        # Validação básica: evita injeção via shell (não usamos shell=True)
+        if any(ch in host for ch in ('&', '|', '<', '>', '^', '"', "'", '%')):
+            if self.log_output:
+                self.log_output.append_log(self.tr("[PING] Host inválido."))
+            return
         try:
-            subprocess.Popen(f'start cmd /k "ping -n 4 -w 1000 {host}"', shell=True)
+            from core.win_cmd import open_external_cmd_k_argv
+            open_external_cmd_k_argv(["ping", "-n", "4", "-w", "1000", host])
         except Exception as exc:
             if self.log_output:
                 self.log_output.append_log(f"[PING] Erro ao executar ping: {exc}")

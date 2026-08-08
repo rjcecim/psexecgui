@@ -1,6 +1,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.5.0-0B5CAB?style=flat-square" alt="Version" />
-  <img src="https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/PyQt6-GUI-41CD52?style=flat-square&logo=qt&logoColor=white" alt="PyQt6" />
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows" />
 </p>
@@ -20,11 +20,13 @@ Interface moderna com identidade visual própria, preview em tempo real e abas d
 ## Índice
 
 - [Visão geral](#visão-geral)
-- [Identidade visual](#identidade-visual)
 - [Requisitos](#requisitos)
 - [Instalação](#instalação)
 - [Uso rápido](#uso-rápido)
-- [Funcionalidades](#funcionalidades)
+- [Segurança de credenciais](#segurança-de-credenciais)
+- [hosts.json](#hostsjson)
+- [Testes](#testes)
+- [Build](#build)
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Documentação](#documentação)
 
@@ -37,33 +39,13 @@ Interface moderna com identidade visual própria, preview em tempo real e abas d
 | **Arquivos** | `.exe`, `.msi`, `.ps1`, `.bat` e outros — seleção por arquivo ou pasta |
 | **Cópia remota** | Robocopy integrado para enviar arquivos/pastas ao host antes de executar |
 | **Comando manual** | Digite o comando remoto (ex.: `cmd`, `powershell`) quando não houver arquivo |
-| **Preview** | Comando completo atualizado em tempo real antes de executar |
-| **Execução** | Comando aberto em terminal externo (`cmd /k`) para acompanhamento visual |
-| **Inventário** | PsInfo remoto (sistema, aplicativos, discos) sob demanda |
+| **Preview** | Comando sanitizado (senha mascarada) atualizado em tempo real |
+| **Execução** | Terminal externo (`cmd /k` via lista de args, sem `shell=True`) |
+| **Inventário** | PsInfo remoto + Remote Registry (32/64 bits) |
+| **Busca multi-host** | Pesquisa de aplicativos em lista de hosts (`hosts.json`) |
 | **RustDesk** | Coleta ID no host e abre conexão local |
 
 Versão do aplicativo: **`1.5.0`** (`APP_VERSION` em `ui/branding.py`).
-
----
-
-## Identidade visual
-
-Constante e assets centralizados em `ui/branding.py` e `assets/`:
-
-| Asset | Uso |
-|-------|-----|
-| `assets/icon.ico` | Ícone do executável (PyInstaller) e da janela |
-| `assets/app_icon.png` | Fallback do ícone da janela / documentação |
-| `assets/app_mark.png` | Marca no cabeçalho da UI (mesma linha do seletor de arquivo) |
-
-Paleta de referência: azure sólido `#0B5CAB` (fundo do ícone sem degradê), cyan `#38BDF8`.
-Nome exibido: **Instalador Remoto via PsExec**.
-
-Para regenerar o `.ico` a partir de `app_icon.png`:
-
-```bash
-python scripts/generate_brand_assets.py
-```
 
 ---
 
@@ -71,13 +53,13 @@ python scripts/generate_brand_assets.py
 
 | Item | Observação |
 |------|------------|
-| **Sistema** | Windows 10 ou 11 (APIs para Mica e grupos de processador) |
-| **Python** | 3.x |
+| **Sistema** | Windows 10 ou 11 |
+| **Python** | 3.10+ |
 | **PyQt6** | Interface gráfica |
-| **PsExec** | PSTools — caminho configurável (padrão: `C:\PSTools\PsExec.exe`) |
-| **PsInfo64** | PSTools — inventário remoto (padrão: `C:\PSTools\PsInfo64.exe`) |
-| **RustDesk** | Para “Conectar via RustDesk”: instalado no host remoto e no PC local |
-| **Rede** | Acesso ao host remoto (SMB), credenciais se necessário |
+| **PsExec** | PSTools — padrão `C:\PSTools\` |
+| **PsInfo64** | Inventário remoto |
+| **RustDesk** | Opcional — conexão remota |
+| **Rede** | SMB / Remote Registry conforme o fluxo |
 
 ---
 
@@ -85,21 +67,16 @@ python scripts/generate_brand_assets.py
 
 ```bash
 cd psexecgui
-
 python -m venv .venv
 .venv\Scripts\activate
-
-pip install PyQt6
+pip install -e ".[dev]"
 ```
 
-### Executável standalone (sem janela de console)
+Ou apenas runtime:
 
 ```bash
-pip install pyinstaller
-pyinstaller PSExecGUI.spec --noconfirm
+pip install PyQt6
 ```
-
-O executável será gerado em **`dist/PSExecGUI.exe`** (ícone e pasta `assets/` embutidos).
 
 ---
 
@@ -109,77 +86,75 @@ O executável será gerado em **`dist/PSExecGUI.exe`** (ícone e pasta `assets/`
 python main.py
 ```
 
-1. No cabeçalho, selecione um arquivo (ou pasta).
-2. Preencha **host remoto** e, se precisar, usuário/senha na aba **PsExec**.
-3. Ajuste opções nas abas que aparecerem (MSI, PowerShell, CMD, Robocopy).
-4. Confira o **preview** do comando e clique em **Executar**.
+1. Selecione um arquivo (ou pasta) no cabeçalho.
+2. Preencha **host remoto** e, se necessário, usuário/senha na aba **PsExec**.
+3. Ajuste opções nas abas (MSI, PowerShell, CMD, Robocopy).
+4. Confira o **preview** (senha aparece como `********`) e clique em **Executar**.
 
-O comando é aberto em um terminal externo para você acompanhar a saída.
+### Inventário (PsInfo)
 
-### Inventário remoto (PsInfo)
+Botão **PsInfo** ao lado do Ping — coleta sistema, aplicativos e discos.
 
-1. Preencha **Host remoto** na aba **PsExec**.
-2. Clique no botão **PsInfo** ao lado do **Ping**.
-3. A aba **PsInfo** abre e coleta **Sistema + Aplicativos + Discos** com:
-   - `PsInfo64.exe \\HOST -s -d -accepteula -nobanner`
+### RustDesk
 
-Na aba PsInfo, os cards podem ser ocultados/expandidos, há spinner durante a coleta, e o app esconde preview, log e botões Play/Stop/Restart.
-
-### Conectar via RustDesk
-
-1. Preencha **Host remoto** na aba **PsExec**.
-2. Clique no botão **RustDesk** (ao lado do Ping/PsInfo).
-3. O app coleta o ID no host via PsExec (`-h -s`) e abre localmente:
-   - `rustdesk.exe --connect <ID>`
-
-Status e erros aparecem no **Log de Execução**.
+Botão **RustDesk** — obtém o ID no host (`--get-id` via PsExec `-h -s`) e abre `rustdesk.exe --connect <ID>` localmente.
 
 ---
 
-## Funcionalidades
+## Segurança de credenciais
 
-### Seleção
+Política central em `utils/redaction.py`:
 
-- **Arquivo** — `.exe`, `.msi`, `.ps1`, `.bat` ou outro.
-- **Pasta** — diretório para cópia integral com Robocopy.
-- **Ajuda** — executa o arquivo com `/?` para ver argumentos (quando aplicável).
+- A senha **nunca** aparece no preview, logs, `exec_history.log`, mensagens de erro ou arquivos temporários.
+- O comando real (com `-p`) só existe em memória no momento da execução.
+- Preferência: use a sessão Windows atual (sem `-u`/`-p`) quando possível.
 
-### Aba PsExec (sempre visível)
+### Limitação inerente ao PsExec
 
-| Card | Conteúdo |
-|------|----------|
-| **Conexão** | Caminho do PsExec, host remoto (Ping / PsInfo / RustDesk), comando remoto |
-| **Autenticação** | Usuário e senha (`DOMAIN\user`) |
-| **Privilégios e sessão** | Elevação (-h, -s, -l), sessão interativa (-i), ID de sessão |
-| **Desempenho** | Prioridade, grupo CPU, afinidade |
-| **Flags e argumentos** | Timeout, -d, -e, -c, -f, -v, -accepteula, -nobanner, args extras |
+Quando `-u`/`-p` são necessários, o PsExec recebe a senha na linha de comando do processo. Isso é uma limitação do transporte Sysinternals — o aplicativo **não consegue eliminá-la**, apenas evita gravá-la em disco/UI/logs.
 
-Campos de texto (Host, Comando remoto, Usuário, Senha, Args extras) têm ícone de limpar quando há conteúdo.
+---
 
-### Aba PsInfo (sob demanda)
+## hosts.json
 
-| Card | Conteúdo |
-|------|----------|
-| **Sistema** | Windows / CPU / RAM / etc. em grade chave/valor |
-| **Aplicativos** | Lista com busca + contador |
-| **Discos** | Volume / Tipo / Formato / Rótulo / Tamanho / Livre / % |
+Arquivo **local** (não versionar hosts reais):
 
-### Abas dinâmicas
+1. Copie `hosts.example.json` → `hosts.json`
+2. Edite com os nomes dos computadores do seu ambiente
 
-| Aba | Quando aparece | Principais opções |
-|-----|----------------|-------------------|
-| **MSI** | Arquivo `.msi` | Ação, interface, reinício, log, repair, update |
-| **PowerShell** | Arquivo `.ps1` ou comando `powershell` | -NoProfile, -NoExit, -ExecutionPolicy, -WindowStyle, -Command, -EncodedCommand |
-| **CMD** | Arquivo `.bat` ou comando `cmd` | /C, /K, /Q, /D, /S, campo de comando |
-| **Robocopy** | Arquivo ou pasta (exceto `.exe`) e comando não manual | Destino relativo ao C:, switches |
+`hosts.json` está no `.gitignore`. O arquivo de exemplo acompanha o repositório e o build.
 
-### Execução e log
+---
 
-- **Preview** — comando completo (Robocopy + PsExec quando houver) em tempo real.
-- **Executar** — `start cmd /k <comando>` (terminal externo).
-- **Parar** — interrompe processo do executor interno.
-- **Reiniciar** — reinicia o aplicativo.
-- **Log** — saída na interface e registro em `exec_history.log`.
+## Logging
+
+Histórico sanitizado em:
+
+- **Padrão:** `%LOCALAPPDATA%\PSExecGUI\logs\exec_history.log`
+- **Portable:** pasta `logs\` ao lado do exe (crie `portable.flag` ou defina `PSEXECGUI_PORTABLE=1`)
+
+---
+
+## Testes
+
+```bash
+pip install -e ".[dev]"
+pytest tests/unit -q
+python -m compileall -q core services utils ui main.py
+```
+
+Testes **não** executam PsExec contra máquinas reais. CI: GitHub Actions (`windows-latest`).
+
+---
+
+## Build
+
+```bash
+pip install pyinstaller
+pyinstaller PSExecGUI.spec --noconfirm
+```
+
+Gera `dist/PSExecGUI.exe` com `assets/`, `config/` e `hosts.example.json`. **Não** empacota `hosts.json`, credenciais, logs ou testes.
 
 ---
 
@@ -187,33 +162,30 @@ Campos de texto (Host, Comando remoto, Usuário, Senha, Args extras) têm ícone
 
 ```
 psexecgui/
-├── main.py                 # Entrada, MainWindow e cabeçalho de marca
-├── assets/
-│   ├── app_icon.png        # Ícone completo (tile) — fallback da janela
-│   ├── app_mark.png        # Marca — cabeçalho da UI
-│   └── icon.ico            # Ícone do executável / janela Windows
+├── main.py                 # UI / MainWindow
 ├── core/
-│   ├── builder.py          # Montagem PsExec, Robocopy, msiexec
-│   └── executor.py         # Execução assíncrona
-├── ui/
-│   ├── branding.py         # APP_NAME / APP_VERSION / ícone / marca
-│   ├── style.py            # Estilos globais
-│   ├── mica.py             # Efeito Mica (Windows 11)
-│   ├── tabs/               # psexec, psinfo, msi, robocopy, powershell, cmd
-│   └── widgets/            # selector, preview, log, card, flow, spinner
+│   ├── builder.py          # CommandBuilder → CommandSpec
+│   ├── executor.py         # Executor + ExecutionResult
+│   ├── models.py           # Domain models
+│   └── win_cmd.py          # subprocess sem shell=True
+├── services/
+│   └── ops.py              # Execução, uninstall, RustDesk
 ├── utils/
-│   ├── api.py              # API Windows (processadores)
-│   ├── psinfo.py           # Parse do output do PsInfo
-│   └── validator.py        # Validadores (afinidade, etc.)
-├── scripts/
-│   └── generate_brand_assets.py  # Reexporta ICO a partir de app_icon.png
-├── PSExecGUI.spec          # PyInstaller (exe sem console + ícone + assets)
-├── README.md
-└── documentation.md        # Lógicas backend e frontend
+│   ├── redaction.py        # Política central de senha
+│   ├── app_logging.py      # Logging seguro
+│   ├── app_catalog.py      # ApplicationCatalog + validação
+│   ├── psinfo.py           # Parser / Remote Registry
+│   └── hosts.py            # hosts.json
+├── ui/                     # Abas e widgets
+├── config/ApplicationCatalog.json
+├── hosts.example.json
+├── tests/unit/
+├── pyproject.toml
+└── PSExecGUI.spec
 ```
 
 ---
 
 ## Documentação
 
-Para detalhes de **backend** (CommandBuilder, Executor, fluxo de comandos) e **frontend** (MainWindow, branding, abas, sinais, preview), consulte **[documentation.md](documentation.md)**.
+Detalhes técnicos: **[documentation.md](documentation.md)**.

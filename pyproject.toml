@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psexecgui"
+version = "1.5.0"
+description = "Interface gráfica para execução remota via PsExec (PSTools)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "UNLICENSED" }
+authors = [{ name = "rjcecim" }]
+dependencies = [
+    "PyQt6>=6.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["core*", "ui*", "utils*", "services*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "windows: testes que exigem APIs Windows reais",
+    "integration: testes de integração",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # linhas longas — estilo legado da UI
+    "E741",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E402"]
+"main.py" = ["E402", "F401"]

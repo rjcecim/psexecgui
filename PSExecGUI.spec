@@ -1,5 +1,5 @@
-# -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec: gera exe sem console (só janela da aplicação)
+﻿# -*- mode: python ; coding: utf-8 -*-
+# PyInstaller spec: gera exe sem console (so janela da aplicacao)
 
 block_cipher = None
 
@@ -9,7 +9,8 @@ a = Analysis(
     binaries=[],
     datas=[
         ('assets', 'assets'),
-        ('config', 'config'),  # embutido no exe (+ cópia em dist/ ao final)
+        ('config', 'config'),
+        ('hosts.example.json', '.'),
     ],
     hiddenimports=[
         'PyQt6.QtCore',
@@ -19,11 +20,17 @@ a = Analysis(
         'ui.tabs.appsearch',
         'utils.psinfo',
         'utils.app_catalog',
+        'utils.redaction',
+        'utils.app_logging',
+        'utils.hosts',
+        'services.ops',
+        'core.models',
+        'core.win_cmd',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['tests', 'pytest'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -46,7 +53,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,   # sem console — só a janela da aplicação
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -55,7 +62,6 @@ exe = EXE(
     icon='assets/icon.ico',
 )
 
-# Copia config/ para dist/ ao lado do .exe (editável em runtime)
 import shutil
 from pathlib import Path
 
@@ -65,3 +71,8 @@ if _src_config.is_dir():
     if _dst_config.exists():
         shutil.rmtree(_dst_config)
     shutil.copytree(_src_config, _dst_config)
+
+_src_hosts_ex = Path(SPECPATH) / 'hosts.example.json'
+_dst_hosts_ex = Path(DISTPATH) / 'hosts.example.json'
+if _src_hosts_ex.is_file():
+    shutil.copy2(_src_hosts_ex, _dst_hosts_ex)

@@ -14,18 +14,20 @@ from core.builder import CommandBuilder
 from ui.widgets.preview import CommandPreviewWidget
 from ui.widgets.log import LogOutputWidget
 from core.executor import Executor
-import subprocess
-import re
-import tempfile
-import uuid
 from ui.tabs.powershell import PowerShellTab
 from ui.tabs.cmd import CmdTab
 from ui.tabs.psinfo import PsInfoTab
 from ui.tabs.appsearch import AppSearchTab
 from ui.mica import enable_mica_for_widget
 from ui.branding import APP_DISPLAY_NAME, APP_NAME, APP_VERSION, ORG_NAME, app_icon, app_mark_pixmap
-import datetime
-
+from services.ops import (
+    CommandExecutionService,
+    CredentialContext,
+    RemoteUninstallService,
+    RustDeskService,
+)
+from utils.app_logging import append_history, configure_logging
+from utils.redaction import redact_command_text
 
 from ui.style import ICON_FONT_PT
 
@@ -234,11 +236,21 @@ class MainWindow(QMainWindow):
         self._apply_initial_geometry()
         
         # Instâncias auxiliares
+        configure_logging()
         self.command_builder = CommandBuilder()
         self.executor = Executor()
+        self._execution_service = CommandExecutionService(
+            self.executor, log_fn=self.log_output.append_log
+        )
+        self._execution_service.set_button_callbacks(
+            self.run_button.setEnabled, self.stop_button.setEnabled
+        )
+        self._uninstall_service = RemoteUninstallService()
+        self._rustdesk_service = RustDeskService()
         self._rustdesk_collecting = False
         self._rustdesk_out_lines = []
         self._rustdesk_err_lines = []
+        self._rustdesk_creds = None
         
         # Conexões
         self.file_selector.fileSelected.connect(self.on_file_selected)
@@ -306,6 +318,12 @@ class MainWindow(QMainWindow):
         self._update_psinfo_mode_ui()
         self._last_tab_widget = self.tabs.currentWidget()
 
+    def _current_creds(self) -> CredentialContext:
+        return CredentialContext(
+            user=(self.psexec_tab.user_edit.text() or "").strip(),
+            password=self.psexec_tab.pass_edit.text() or "",
+        )
+
     def _escape_quotes(self, s: str) -> str:
         return (s or "").replace('"', '\\"')
 
@@ -316,31 +334,35 @@ class MainWindow(QMainWindow):
         return f'"{s}"' if " " in s else s
 
     def _build_psexec_exe(self) -> str:
-        from utils.pstools import resolve_pstools_tool
+        from services.ops import resolve_psexec_exe
 
-        p = (self.psexec_tab.psexec_path_edit.text() or "").strip()
-        exe = resolve_pstools_tool(p, ("PsExec64.exe", "PsExec.exe"))
-        if exe:
-            exe = os.path.normpath(exe.replace('"', "").replace("'", ""))
-            return self._quote_if_needed(exe)
-        return "PsExec.exe"
+        return resolve_psexec_exe(
+            (self.psexec_tab.psexec_path_edit.text() or "").strip()
+        )
 
     def on_rustdesk_clicked(self) -> None:
         """
         Fluxo:
         1) Executa remoto: rustdesk.exe --get-id (via PsExec com -h -s)
         2) Extrai ID do stdout
-        3) Executa local: rustdesk.exe --id <ID>
+        3) Executa local: rustdesk.exe --connect <ID>
         """
         host = (self.psexec_tab.host_edit.text() or "").strip().strip("\\")
         if not host:
             ph = self.psexec_tab.host_edit.placeholderText()
-            self.log_output.append_log(self.tr(f"[RUSTDESK] Por favor, insira um host ({ph})."))
+            self.log_output.append_log(
+                self.tr(f"[RUSTDESK] Por favor, insira um host ({ph}).")
+            )
             return
 
-        # Não interferir em execuções internas em andamento (robocopy etc.)
-        if getattr(self.executor, "future", None) is not None or getattr(self.executor, "process", None) is not None:
-            self.log_output.append_log(self.tr("[RUSTDESK] Aguarde a execução atual terminar antes de usar RustDesk."))
+        if getattr(self.executor, "future", None) is not None or getattr(
+            self.executor, "process", None
+        ) is not None:
+            self.log_output.append_log(
+                self.tr(
+                    "[RUSTDESK] Aguarde a execução atual terminar antes de usar RustDesk."
+                )
+            )
             return
 
         if self._rustdesk_collecting:
@@ -350,33 +372,23 @@ class MainWindow(QMainWindow):
         self._rustdesk_out_lines = []
         self._rustdesk_err_lines = []
         self._rustdesk_last_path = None
+        self._rustdesk_creds = self._current_creds()
 
-        psexec_exe = self._build_psexec_exe()
-        user = (self.psexec_tab.user_edit.text() or "").strip()
-        password = (self.psexec_tab.pass_edit.text() or "").strip()
+        svc = self._rustdesk_service
+        paths = list(svc.remote_paths)
+        pstools = (self.psexec_tab.psexec_path_edit.text() or "").strip()
 
-        creds = ""
-        if user:
-            creds += f' -u "{self._escape_quotes(user)}"'
-        if password:
-            creds += f' -p "{self._escape_quotes(password)}"'
+        def build_spec(remote_path: str):
+            return svc.build_get_id_spec(
+                host=host,
+                pstools_path=pstools,
+                creds=self._rustdesk_creds or CredentialContext(),
+                remote_path=remote_path,
+            )
 
-        # Forçar elevação para coletar ID de forma mais consistente
-        forced_flags = " -h -s -accepteula -nobanner"
-
-        rustdesk_remote_paths = [
-            r"C:\Program Files\RustDesk\rustdesk.exe",
-            r"C:\Program Files (x86)\RustDesk\rustdesk.exe",
-        ]
-
-        def build_cmd(remote_path: str) -> str:
-            # Formato solicitado:
-            # PsExec.exe \\HOST -h -s "C:\Program Files\RustDesk\rustdesk.exe" --get-id
-            return f'{psexec_exe} \\\\{host}{creds}{forced_flags} "{remote_path}" --get-id'
-
-        cmd = build_cmd(rustdesk_remote_paths[0])
-
-        self.log_output.append_log(self.tr(f"[RUSTDESK] Conectando em {host} e coletando ID..."))
+        self.log_output.append_log(
+            self.tr(f"[RUSTDESK] Conectando em {host} e coletando ID...")
+        )
 
         def on_out(line: str) -> None:
             if line is None:
@@ -393,7 +405,6 @@ class MainWindow(QMainWindow):
                 self._rustdesk_err_lines.append(t)
 
         def on_done(exit_code: int) -> None:
-            # desconectar handlers temporários
             try:
                 self.executor.outputReceived.disconnect(on_out)
             except Exception:
@@ -408,93 +419,99 @@ class MainWindow(QMainWindow):
                 pass
 
             self._rustdesk_collecting = False
-
-            out_text = "\n".join(self._rustdesk_out_lines).strip()
             err_text = "\n".join(self._rustdesk_err_lines).strip()
+            # Nunca ecoar stderr bruto se contiver senha
+            err_safe = redact_command_text(
+                err_text,
+                passwords=(self._rustdesk_creds.passwords if self._rustdesk_creds else None),
+            )
 
-            # 1) Tenta extrair ID do stdout (geralmente vem só o número)
-            rust_id = ""
-            for ln in self._rustdesk_out_lines:
-                cand = re.sub(r"\D", "", ln)
-                if len(cand) >= 6:
-                    rust_id = cand
-                    break
+            rust_id = svc.extract_id(self._rustdesk_out_lines)
+            is_not_found = svc.is_not_found(err_text)
 
-            # 2) Se não achou ID, e parece "arquivo não encontrado", tentar o segundo caminho e repetir 1 vez
-            not_found_markers = [
-                "could not be found",
-                "não foi possível encontrar",
-                "nao foi possivel encontrar",
-                "não foi encontrado",
-                "nao foi encontrado",
-                "o sistema não pode encontrar",
-                "o sistema nao pode encontrar",
-            ]
-            is_not_found = any(m in (err_text.lower() if err_text else "") for m in not_found_markers)
-
-            if not rust_id and is_not_found and getattr(self, "_rustdesk_last_path", None) != rustdesk_remote_paths[1]:
-                # segunda tentativa
-                self._rustdesk_last_path = rustdesk_remote_paths[1]
+            if (
+                not rust_id
+                and is_not_found
+                and getattr(self, "_rustdesk_last_path", None) != paths[1]
+            ):
+                self._rustdesk_last_path = paths[1]
                 self._rustdesk_collecting = True
                 self._rustdesk_out_lines = []
                 self._rustdesk_err_lines = []
-
-                self.log_output.append_log(self.tr("[RUSTDESK] Tentando caminho alternativo do RustDesk no host..."))
-
+                self.log_output.append_log(
+                    self.tr(
+                        "[RUSTDESK] Tentando caminho alternativo do RustDesk no host..."
+                    )
+                )
                 self.executor.outputReceived.connect(on_out)
                 self.executor.errorReceived.connect(on_err)
                 self.executor.finished.connect(on_done)
-                self.executor.run(build_cmd(rustdesk_remote_paths[1]))
+                self.executor.run(
+                    build_spec(paths[1]),
+                    passwords=(
+                        self._rustdesk_creds.passwords if self._rustdesk_creds else None
+                    ),
+                )
                 return
 
             if not rust_id:
-                if exit_code != 0 and ("couldn't access" in err_text.lower() or "couldnt access" in err_text.lower()):
-                    # PsExec não conseguiu acessar o host
-                    self.log_output.append_log(self.tr("[RUSTDESK] ERRO: Não foi possível conectar ao host (rede/RPC/credenciais)."))
-                    if err_text:
-                        self.log_output.append_log(self.tr(f"[RUSTDESK] Detalhes: {err_text}"))
+                if exit_code != 0 and svc.is_access_error(err_text):
+                    self.log_output.append_log(
+                        self.tr(
+                            "[RUSTDESK] ERRO: Não foi possível conectar ao host "
+                            "(rede/RPC/credenciais)."
+                        )
+                    )
+                    if err_safe:
+                        self.log_output.append_log(
+                            self.tr(f"[RUSTDESK] Detalhes: {err_safe}")
+                        )
                 elif is_not_found:
-                    self.log_output.append_log(self.tr("[RUSTDESK] ERRO: RustDesk não encontrado no host."))
-                elif err_text:
-                    self.log_output.append_log(self.tr(f"[RUSTDESK] ERRO: {err_text}"))
+                    self.log_output.append_log(
+                        self.tr("[RUSTDESK] ERRO: RustDesk não encontrado no host.")
+                    )
+                elif err_safe:
+                    self.log_output.append_log(
+                        self.tr(f"[RUSTDESK] ERRO: {err_safe}")
+                    )
                 else:
-                    self.log_output.append_log(self.tr("[RUSTDESK] ERRO: Não foi possível obter o ID do RustDesk."))
+                    self.log_output.append_log(
+                        self.tr(
+                            "[RUSTDESK] ERRO: Não foi possível obter o ID do RustDesk."
+                        )
+                    )
+                if self._rustdesk_creds:
+                    self._rustdesk_creds.clear()
+                    self._rustdesk_creds = None
                 return
 
-            self.log_output.append_log(self.tr(f"[RUSTDESK] ID detectado: {rust_id}"))
-
-            # Abrir RustDesk local com o ID
-            local_candidates = []
-            local_candidates.append(r"C:\PSTools\rustdesk.exe")
-            pf = os.environ.get("ProgramFiles", r"C:\Program Files")
-            pfx86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-            local_candidates.append(os.path.join(pf, "RustDesk", "rustdesk.exe"))
-            local_candidates.append(os.path.join(pfx86, "RustDesk", "rustdesk.exe"))
-
-            local_exe = None
-            for c in local_candidates:
-                if os.path.isfile(c):
-                    local_exe = c
-                    break
-            if local_exe is None:
-                local_exe = "rustdesk.exe"
-
-            try:
-                # Sempre usar o ID detectado nesta execução
-                args = [local_exe, "--connect", rust_id]
-                subprocess.Popen(args)
-                self.log_output.append_log(self.tr(f"[RUSTDESK] Executando local: {local_exe} --connect {rust_id}"))
+            self.log_output.append_log(
+                self.tr(f"[RUSTDESK] ID detectado: {rust_id}")
+            )
+            ok, detail = svc.open_local_connect(rust_id)
+            if ok:
+                self.log_output.append_log(
+                    self.tr(f"[RUSTDESK] Executando local: {detail}")
+                )
                 self.log_output.append_log(self.tr("[RUSTDESK] Abrindo RustDesk..."))
-            except FileNotFoundError:
-                self.log_output.append_log(self.tr("[RUSTDESK] ERRO: RustDesk não encontrado no PC local."))
-            except Exception as exc:
-                self.log_output.append_log(self.tr(f"[RUSTDESK] ERRO ao abrir RustDesk local: {exc}"))
+            else:
+                self.log_output.append_log(
+                    self.tr(f"[RUSTDESK] ERRO ao abrir RustDesk local: {detail}")
+                )
+            if self._rustdesk_creds:
+                self._rustdesk_creds.clear()
+                self._rustdesk_creds = None
 
-        self._rustdesk_last_path = rustdesk_remote_paths[0]
+        self._rustdesk_last_path = paths[0]
         self.executor.outputReceived.connect(on_out)
         self.executor.errorReceived.connect(on_err)
         self.executor.finished.connect(on_done)
-        self.executor.run(cmd)
+        self.executor.run(
+            build_spec(paths[0]),
+            passwords=(
+                self._rustdesk_creds.passwords if self._rustdesk_creds else None
+            ),
+        )
 
     def open_psinfo_tab(self) -> None:
         """
@@ -564,128 +581,20 @@ class MainWindow(QMainWindow):
         app_label: str,
         log_tag: str = "PSINFO",
     ) -> None:
-        """Abre console separado com PsExec (-h -s) para desinstalar o app remoto."""
-        host = (host or "").strip().strip("\\")
-        if not host:
-            self.log_output.append_log(
-                self.tr(f"[{log_tag}] Host remoto não informado para desinstalação.")
+        """Desinstalação remota via serviço (sem senha em arquivos temporários)."""
+        creds = self._current_creds()
+        try:
+            self._uninstall_service.run(
+                host=host,
+                remote_cmd=remote_cmd,
+                app_label=app_label,
+                pstools_path=(self.psexec_tab.psexec_path_edit.text() or "").strip(),
+                creds=creds,
+                log_tag=log_tag,
+                log_fn=self.log_output.append_log,
             )
-            return
-
-        remote_cmd = (remote_cmd or "").strip()
-        if not remote_cmd:
-            self.log_output.append_log(
-                self.tr(f"[{log_tag}] Comando de desinstalação vazio.")
-            )
-            return
-
-        psexec_exe = self._build_psexec_exe()
-        user = (self.psexec_tab.user_edit.text() or "").strip()
-        password = (self.psexec_tab.pass_edit.text() or "").strip()
-
-        creds = ""
-        creds_display = ""
-        if user:
-            creds += f' -u "{self._escape_quotes(user)}"'
-            creds_display += f' -u "{self._escape_quotes(user)}"'
-        if password:
-            creds += f' -p "{self._escape_quotes(password)}"'
-            creds_display += " -p ****"
-
-        # -h eleva; -s roda como SYSTEM.
-        # Aspas externas em cmd /c: necessário p/ paths com espaços/(x86) + parâmetros extras.
-        forced_flags = " -h -s -accepteula -nobanner"
-        if not remote_cmd.lower().lstrip().startswith("cmd "):
-            remote_for_psexec = f'cmd /c "{remote_cmd}"'
-        else:
-            remote_for_psexec = remote_cmd
-        full_cmd = f'{psexec_exe} \\\\{host}{creds}{forced_flags} {remote_for_psexec}'
-        display_cmd = f'{psexec_exe} \\\\{host}{creds_display}{forced_flags} {remote_for_psexec}'
-
-        self.log_output.append_log(
-            self.tr(f"[{log_tag}] Desinstalando em {host}: {app_label}")
-        )
-        self.log_output.append_log(self.tr(f"[{log_tag}] {display_cmd}"))
-
-        def _bat_echo_safe(text: str) -> str:
-            """Escapa caracteres que quebram echo/parsing em arquivos .bat."""
-            t = text or ""
-            for src, dst in (
-                ("%", "%%"),
-                ("^", "^^"),
-                ("&", "^&"),
-                ("|", "^|"),
-                ("<", "^<"),
-                (">", "^>"),
-                ("(", "^("),
-                (")", "^)"),
-                ('"', "'"),
-            ):
-                t = t.replace(src, dst)
-            return t
-
-        # Arquivos únicos por desinstalação — evita sobrescrever o .bat de outra janela
-        # aberta (causa erros como "'DE' não é reconhecido" / "0 foi inesperado").
-        uid = uuid.uuid4().hex[:12]
-        tmp = tempfile.gettempdir()
-        cmd_txt = os.path.join(tmp, f"psexecgui_uninst_{uid}.txt")
-        run_cmd = os.path.join(tmp, f"psexecgui_uninst_{uid}_run.cmd")
-        bat_path = os.path.join(tmp, f"psexecgui_uninst_{uid}.bat")
-
-        access = user if user else "credencial atual / integrada"
-        safe_host = _bat_echo_safe(host)
-        safe_access = _bat_echo_safe(access)
-        safe_app = _bat_echo_safe(app_label or "")
-
-        with open(cmd_txt, "w", encoding="utf-8") as f:
-            f.write(display_cmd)
-
-        # Comando PsExec isolado: paths com "(x86)" não quebram o wrapper .bat
-        with open(run_cmd, "w", encoding="utf-8") as f:
-            f.write("@echo off\r\n")
-            f.write(full_cmd.replace("%", "%%") + "\r\n")
-            f.write("exit /b %ERRORLEVEL%\r\n")
-
-        bat_lines = [
-            "@echo off",
-            "setlocal",
-            "chcp 65001 >nul",
-            "echo ========================================",
-            "echo  Desinstalacao remota",
-            "echo ========================================",
-            f"echo  Host     : \\\\{safe_host}",
-            f"echo  Acesso   : {safe_access}",
-            f"echo  App      : {safe_app}",
-            "echo ========================================",
-            "echo  Comando completo:",
-            "echo ----------------------------------------",
-            f'type "{cmd_txt}"',
-            "echo.",
-            "echo ----------------------------------------",
-            "echo  Executando...",
-            "echo ========================================",
-            "echo.",
-            f'call "{run_cmd}"',
-            "set EXITCODE=%ERRORLEVEL%",
-            "echo.",
-            "echo ========================================",
-            "if not \"%EXITCODE%\"==\"0\" goto :fail",
-            "echo  Resultado: SUCESSO  ^(exit code 0^)",
-            "goto :done",
-            ":fail",
-            "echo  Resultado: FALHA    ^(exit code %EXITCODE%^)",
-            ":done",
-            "echo ========================================",
-            "echo.",
-            "endlocal",
-        ]
-        with open(bat_path, "w", encoding="utf-8") as f:
-            f.write("\r\n".join(bat_lines) + "\r\n")
-
-        subprocess.Popen(f'start "Uninstall" cmd /k ""{bat_path}""', shell=True)
-        self.log_output.append_log(
-            self.tr(f"[{log_tag}] Comando aberto em terminal externo.")
-        )
+        finally:
+            creds.clear()
 
     def _on_tab_changed(self, _index: int) -> None:
         # Se o usuário saiu da aba PsInfo / Pesquisa, encerrá-la (remover a aba)
@@ -1008,48 +917,48 @@ class MainWindow(QMainWindow):
     def build_command_for_execution(self):
         """
         Centraliza a lógica de montagem do comando para execução, preview e log.
-        Escolhe o método correto do CommandBuilder conforme a aba ativa e contexto.
+        Sempre retorna representação SANITIZADA (senha mascarada).
         """
+        specs = self.build_specs_for_execution()
+        passwords = []
+        pwd = self.psexec_tab.pass_edit.text() or ""
+        if pwd.strip():
+            passwords.append(pwd)
+        return "\n".join(s.sanitized_display(passwords) for s in specs)
+
+    def build_specs_for_execution(self):
+        """Mesma lógica de build_command_for_execution, retornando CommandSpec(s)."""
         selection = getattr(self.file_selector, 'selected_file', None)
-        selection_mode = getattr(self.file_selector, 'selection_mode', None)
         remote_cmd = self.psexec_tab.remote_cmd_edit.text().strip().lower()
-        
-        # Se há arquivo selecionado, verificar se deve usar comandos especiais
+        specs = []
+
         if selection:
             ext = selection.lower().split('.')[-1] if '.' in selection else ''
-            
-            # CORREÇÃO: Sempre usar build_full_command se robocopy estiver habilitado
-            # Isso garante que o robocopy seja incluído mesmo com parâmetros da aba CMD ou PowerShell
             if self.should_enable_robocopy():
-                return self.command_builder.build_full_command()
-            
-            # Se robocopy não está habilitado, usar comandos específicos
-            # Se é arquivo .bat e aba CMD está ativa, usar _build_psexec_bat_script
+                return self.command_builder.build_execution_plan()
             if ext == 'bat' and self.tabs.currentWidget() == self.cmd_tab:
-                return self.command_builder._build_psexec_bat_script()
-            
-            # Se é arquivo .ps1, usar _build_psexec_ps_script
+                specs.append(self.command_builder._build_psexec_bat_script_spec())
+                return specs
             if ext == 'ps1':
-                return self.command_builder._build_psexec_ps_script()
-            
-            # Caso contrário, usar build_psexec
-            return self.command_builder.build_psexec()
-        
-        # Se não há arquivo selecionado (comando manual)
-        # Se comando remoto powershell
+                specs.append(self.command_builder._build_psexec_ps_script_spec())
+                return specs
+            specs.append(self.command_builder.build_psexec_spec())
+            return specs
+
         if remote_cmd in ['powershell', 'powershell.exe']:
-            return self.command_builder._build_psexec_ps_script()
-        # Se comando remoto cmd
+            specs.append(self.command_builder._build_psexec_ps_script_spec())
+            return specs
         if remote_cmd in ['cmd', 'cmd.exe']:
-            return self.command_builder._build_psexec_bat_script()
-        # Se aba CMD ativa
+            specs.append(self.command_builder._build_psexec_bat_script_spec())
+            return specs
         if self.tabs.currentWidget() == self.cmd_tab:
-            return self.command_builder._build_psexec_bat_script()
-        # Se aba PowerShell ativa
+            specs.append(self.command_builder._build_psexec_bat_script_spec())
+            return specs
         if self.tabs.currentWidget() == self.powershell_tab:
-            return self.command_builder._build_psexec_ps_script()
-        # Caso padrão
-        return self.command_builder.build_psexec()
+            specs.append(self.command_builder._build_psexec_ps_script_spec())
+            return specs
+        specs.append(self.command_builder.build_psexec_spec())
+        return specs
 
     def update_command(self):
         from PyQt6.QtWidgets import QApplication
@@ -1127,7 +1036,7 @@ class MainWindow(QMainWindow):
             robocopy_params = self.robocopy_tab.get_params() if robocopy_enabled else None
             self.command_builder.set_robocopy_params(robocopy_params)
             self.command_builder.set_psexec_params(psexec_params)
-            # Atualizar preview SEMPRE usando build_command_for_execution
+            # Atualizar preview SEMPRE com representação sanitizada
             command = self.build_command_for_execution()
             self.command_preview.set_command(command)
         else:
@@ -1158,73 +1067,50 @@ class MainWindow(QMainWindow):
             }
             self.command_builder.set_psexec_params(psexec_params)
             self.command_builder.set_robocopy_params(None)
-            # Atualizar preview SEMPRE usando build_command_for_execution
+            # Atualizar preview SEMPRE com representação sanitizada
             command = self.build_command_for_execution()
             self.command_preview.set_command(command)
 
     def log_to_file(self, text: str):
-        """
-        Salva uma linha de log no arquivo 'exec_history.log' na pasta do app ou do executável.
-        Cria o arquivo se não existir, ou anexa se já existir.
-        """
-        import sys
-        if getattr(sys, 'frozen', False):
-            # Executável empacotado (PyInstaller, etc)
-            app_dir = os.path.dirname(sys.executable)
-        else:
-            # Execução normal (script .py)
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-        log_path = os.path.join(app_dir, 'exec_history.log')
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        with open(log_path, 'a', encoding='utf-8') as f:
-            f.write(f"[{timestamp}] {text}\n")
+        """Grava histórico sanitizado (nunca senha)."""
+        pwd = self.psexec_tab.pass_edit.text() if hasattr(self, "psexec_tab") else ""
+        passwords = [pwd] if pwd else None
+        append_history(text, passwords=passwords)
 
     def on_run(self):
-        # Garante que os params das abas (PowerShell/CMD/etc.) estejam sincronizados
         self.update_command()
-        full_command = self.build_command_for_execution()
+        passwords = []
+        pwd = self.psexec_tab.pass_edit.text() or ""
+        if pwd.strip():
+            passwords.append(pwd)
+
         self.log_output.clear_log()
         self.run_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.log_output.append_log(f"[DEBUG] Comando completo: {full_command}")
-        # Salva no log de arquivo
-        self.log_to_file(full_command)
-        import subprocess
-        if '\n' in full_command:
-            robocopy_cmd, psexec_cmd = full_command.split('\n', 1)
-            def run_psexec_if_success(exit_code):
-                self.executor.finished.disconnect(run_psexec_if_success)
-                # Robocopy: 0-7 = sucesso/avisos; >= 8 = falha real
-                # 3 = arquivos copiados (1) + extras no destino (2) — comum em redeploy
-                robocopy_ok = 0 <= exit_code <= 7
-                if robocopy_ok and psexec_cmd:
-                    self.log_output.append_log(
-                        self.tr(f"Robocopy OK (código {exit_code}). Iniciando PsExec...")
-                    )
-                    # CORREÇÃO: Executar PsExec diretamente no cmd, não dentro de PowerShell
-                    subprocess.Popen(f'start cmd /k {psexec_cmd}', shell=True)
-                    self.log_output.append_log(self.tr("Comando executado em terminal externo."))
-                else:
-                    self.log_output.append_log(
-                        self.tr(f"Robocopy falhou (código {exit_code}). PsExec nao sera executado.")
-                    )
-                self.run_button.setEnabled(True)
-                self.stop_button.setEnabled(False)
-            self.executor.finished.connect(run_psexec_if_success)
-            self.executor.run(robocopy_cmd)
+
+        plan = self.build_specs_for_execution()
+        if not plan:
+            self.log_output.append_log(self.tr("Nenhum comando para executar."))
+            self.run_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
             return
-        psexec_cmd = full_command
-        if psexec_cmd:
-            # CORREÇÃO: Executar PsExec diretamente no cmd, não dentro de PowerShell
-            subprocess.Popen(f'start cmd /k {psexec_cmd}', shell=True)
-            self.log_output.append_log(self.tr("Comando executado em terminal externo."))
-        self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+
+        result = self._execution_service.launch_plan(plan, passwords=passwords)
+        if not result.robocopy_started and not result.ok:
+            self.run_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
 
     def on_stop(self):
         self.executor.stop()
         self.run_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.log_output.append_log(
+            self.tr(
+                "Parada solicitada: processo local encerrado. "
+                "Se a operação já havia sido enviada via PsExec, "
+                "o processo remoto pode continuar em execução."
+            )
+        )
 
     def on_process_finished(self, exit_code):
         self.run_button.setEnabled(True)
@@ -1256,8 +1142,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.executor.stop()
-        # Se o executor tiver método shutdown (ThreadPoolExecutor), finalize-o corretamente
-        if hasattr(self.executor, 'executor') and hasattr(self.executor.executor, 'shutdown'):
+        if hasattr(self.executor, "shutdown"):
+            try:
+                self.executor.shutdown(wait=False)
+            except Exception:
+                pass
+        elif hasattr(self.executor, 'executor') and hasattr(self.executor.executor, 'shutdown'):
             try:
                 self.executor.executor.shutdown(wait=False)
             except Exception:
@@ -1272,7 +1162,7 @@ if __name__ == "__main__":
         def write(self, msg):
             msg = str(msg)
             if msg and not msg.isspace():
-                self.log_func(msg.rstrip())
+                self.log_func(redact_command_text(msg.rstrip()))
         def flush(self):
             pass
     app = QApplication(sys.argv)
@@ -1295,7 +1185,7 @@ if __name__ == "__main__":
     # Handler global para exceções não capturadas
     def excepthook(type, value, tb):
         lines = traceback.format_exception(type, value, tb)
-        window.log_output.append_log(''.join(lines))
+        window.log_output.append_log(redact_command_text(''.join(lines)))
     sys.excepthook = excepthook
     window.show()
     sys.exit(app.exec()) 

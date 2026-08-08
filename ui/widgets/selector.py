@@ -151,9 +151,9 @@ class FileSelectorWidget(QWidget):
             return
 
         try:
-            # Executar o arquivo com /? em um terminal externo
+            from core.win_cmd import open_external_cmd_k_argv
             exe_path = self.selected_file.replace('"', '')
-            subprocess.Popen(f'start cmd /k "\"{exe_path}\" /?"', shell=True)
+            open_external_cmd_k_argv([exe_path, "/?"])
         except Exception as e:
             print(f"Erro ao executar {self.selected_file} /?: {e}") 
 

@@ -36,7 +36,23 @@ desktop.ini
 exec_history.log
 *.log
 
+# Configuração local de hosts (use hosts.example.json como modelo)
+hosts.json
+
+# Modo portable
+portable.flag
+
 # Arquivos temporários
 *.tmp
 *.temp
 *.bak
+
+# Testes / cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Dados locais
+logs/

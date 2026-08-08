@@ -34,19 +34,17 @@ from utils.psinfo import (
     InstalledApp,
     build_uninstall_remote_cmd,
     describe_uninstall,
-    list_remote_installed_apps_ex,
+    list_remote_installed_apps_status,
 )
 from utils.app_catalog import resolve_uninstall_extras
+from utils.hosts import load_hosts_file, default_hosts_path, app_dir as _hosts_app_dir
 
 # Consultas remotas são I/O-bound; paralelizar acelera a varredura multi-host.
 _SEARCH_MAX_WORKERS = 8
 
 
 def _app_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    # main.py fica na raiz do projeto
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return _hosts_app_dir()
 
 
 def _icon_button(icon_char: str, tooltip: str = "", size: int = INPUT_HEIGHT) -> QPushButton:
@@ -73,40 +71,17 @@ def _icon_button(icon_char: str, tooltip: str = "", size: int = INPUT_HEIGHT) ->
     return btn
 
 
-def load_hosts_file(path: str) -> List[str]:
-    """Carrega lista de hosts do JSON no formato {\"hosts\": [\"HOST1\", ...]}."""
-    with open(path, "r", encoding="utf-8-sig") as f:
-        data = json.load(f)
-    if not isinstance(data, dict) or "hosts" not in data:
-        raise ValueError('Arquivo inválido: esperado um objeto com a chave "hosts".')
-    hosts_raw = data["hosts"]
-    if not isinstance(hosts_raw, list):
-        raise ValueError('Arquivo inválido: "hosts" deve ser uma lista.')
-    out: List[str] = []
-    seen: set[str] = set()
-    for item in hosts_raw:
-        h = str(item or "").strip().strip("\\")
-        if not h:
-            continue
-        key = h.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(h)
-    if not out:
-        raise ValueError("Nenhum host válido encontrado no arquivo.")
-    return out
-
-
 @dataclass
 class SearchHit:
     host: str
     app: InstalledApp
+    # status do host no momento do hit (consultado com sucesso)
+    host_ok: bool = True
 
 
 class _AppSearchWorker(QThread):
-    # done, failed, total, último host, ok (consulta bem-sucedida)
-    progress = pyqtSignal(int, int, int, str, bool)
+    # done, failed, total, último host, ok (consulta bem-sucedida), error_kind
+    progress = pyqtSignal(int, int, int, str, bool, str)
     hitsFound = pyqtSignal(list)  # List[SearchHit] do host recém-consultado
     finished_ok = pyqtSignal(str)  # query
     finished_aborted = pyqtSignal(str)  # query (interrupção pelo usuário)
@@ -123,15 +98,15 @@ class _AppSearchWorker(QThread):
         self._abort = True
 
     @staticmethod
-    def _scan_host(host: str, query_cf: str) -> Tuple[str, List[SearchHit], bool]:
-        ok, apps = list_remote_installed_apps_ex(host)
+    def _scan_host(host: str, query_cf: str) -> Tuple[str, List[SearchHit], bool, str]:
+        status = list_remote_installed_apps_status(host)
         hits: List[SearchHit] = []
-        if ok:
-            for app in apps:
+        if status.ok:
+            for app in status.apps:
                 name = (app.display_name or "").casefold()
                 if query_cf in name:
-                    hits.append(SearchHit(host=host, app=app))
-        return host, hits, ok
+                    hits.append(SearchHit(host=host, app=app, host_ok=True))
+        return host, hits, status.ok, status.error_kind or ("" if status.ok else "unreachable")
 
     def run(self) -> None:
         try:
@@ -157,16 +132,17 @@ class _AppSearchWorker(QThread):
                         break
                     host = futures[fut]
                     try:
-                        host, hits, ok = fut.result()
+                        host, hits, ok, error_kind = fut.result()
                     except Exception:
                         hits = []
                         ok = False
+                        error_kind = "unreachable"
                     if self._abort:
                         break
                     done += 1
                     if not ok:
                         failed += 1
-                    self.progress.emit(done, failed, total, host, ok)
+                    self.progress.emit(done, failed, total, host, ok, error_kind)
                     if hits:
                         self.hitsFound.emit(hits)
             finally:
@@ -175,7 +151,7 @@ class _AppSearchWorker(QThread):
             if self._abort:
                 self.finished_aborted.emit(self.query)
                 return
-            self.progress.emit(total, failed, total, "", True)
+            self.progress.emit(total, failed, total, "", True, "")
             self.finished_ok.emit(self.query)
         except Exception as exc:
             self.finished_err.emit(f"Erro na pesquisa: {exc}")
@@ -369,13 +345,16 @@ class AppSearchTab(QWidget):
         return not sip.isdeleted(self)
 
     def _init_hosts_file(self) -> None:
-        default = os.path.join(_app_dir(), "hosts.json")
+        default = default_hosts_path()
         if os.path.isfile(default):
             self._set_hosts_path(default)
         else:
             self.hosts_path_edit.clear()
             self.hosts_path_edit.setPlaceholderText(
-                self.tr("hosts.json não encontrado — selecione um arquivo JSON")
+                self.tr(
+                    "hosts.json não encontrado — selecione um arquivo "
+                    "(veja hosts.example.json)"
+                )
             )
 
     def _set_hosts_path(self, path: str) -> None:
@@ -518,7 +497,9 @@ class AppSearchTab(QWidget):
         else:
             self.progress_lbl.setText(self.tr(f"0 de {total} consultados"))
 
-    def _on_progress(self, done: int, failed: int, total: int, host: str, _ok: bool) -> None:
+    def _on_progress(
+        self, done: int, failed: int, total: int, host: str, _ok: bool, error_kind: str = ""
+    ) -> None:
         if not self._ui_alive():
             return
         self._hosts_done = done
@@ -527,6 +508,18 @@ class AppSearchTab(QWidget):
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(done)
         self._update_live_stats(done, failed, total, host)
+        if host and not _ok and error_kind and self.log_output:
+            kind_labels = {
+                "auth": "falha de autenticação",
+                "remote_registry": "Remote Registry indisponível",
+                "unreachable": "host inacessível",
+                "invalid_host": "host inválido",
+                "cancelled": "consulta cancelada",
+            }
+            label = kind_labels.get(error_kind, error_kind)
+            self.log_output.append_log(
+                self.tr(f"[PESQUISA] {host}: {label}")
+            )
         self._update_summary(final=False)
 
     def _on_worker_finished(self) -> None:
