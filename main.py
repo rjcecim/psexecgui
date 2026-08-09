@@ -1087,8 +1087,7 @@ class MainWindow(QMainWindow):
         if getattr(self, '_updating_remote_cmd', False):
             return
         # Desabilita o botão de browser se o campo de comando remoto não estiver vazio
-        self.file_selector.file_button.setEnabled(text.strip() == "")
-        self.file_selector.folder_button.setEnabled(text.strip() == "")
+        self.file_selector.browse_button.setEnabled(text.strip() == "")
 
     def on_remote_cmd_edit_changed(self, text):
         selected_file = self.file_selector.selected_file
