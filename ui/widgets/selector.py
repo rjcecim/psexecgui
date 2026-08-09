@@ -100,6 +100,7 @@ class FileSelectorWidget(QWidget):
     # Sinal emitido quando um arquivo ou pasta é selecionado
     fileSelected = pyqtSignal(dict)  # Emite dict: {'mode': 'file'|'folder', 'file': ..., 'folder': ...}
     appSearchRequested = pyqtSignal()  # Abre a tela de pesquisa de aplicativos nos hosts
+    settingsRequested = pyqtSignal()  # Abre a aba Configurações
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -145,11 +146,22 @@ class FileSelectorWidget(QWidget):
         self.help_button.setEnabled(False)
         self.help_button.clicked.connect(self.show_help)
 
+        # \uE713 = Setting / engrenagem (Segoe MDL2 Assets)
+        self.settings_button = QToolButton()
+        self.settings_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.settings_button.setText("\uE713")
+        self.settings_button.setFont(_MDL2_FONT)
+        self.settings_button.setStyleSheet(_MDL2_BTN_STYLE)
+        self.settings_button.setToolTip(self.tr("Configurações"))
+        self.settings_button.setFixedSize(32, 32)
+        self.settings_button.clicked.connect(self.settingsRequested.emit)
+
         self.layout_widget.addWidget(self.icon_label)
         self.layout_widget.addWidget(self.name_label, 1)
         self.layout_widget.addWidget(self.search_button)
         self.layout_widget.addWidget(self.browse_button)
         self.layout_widget.addWidget(self.help_button)
+        self.layout_widget.addWidget(self.settings_button)
         self.setLayout(self.layout_widget)
         self.icon_label.hide()  # só aparece quando há arquivo selecionado
 

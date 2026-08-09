@@ -12,6 +12,8 @@ from utils.redaction import redact_command_text
 
 _LOGGER_NAME = "psexecgui"
 _configured = False
+# Sessão: desligado por padrão — só grava em arquivo se o usuário marcar em Configurações
+_file_logging_enabled = False
 
 # Arquivo de histórico de operações — única fonte de escrita: _append_history_line
 HISTORY_FILENAME = "exec_history.log"
@@ -36,7 +38,7 @@ def _app_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def get_log_dir() -> str:
+def get_log_dir(*, create: bool = True) -> str:
     """
     Diretório de logs:
     - portable / env: pasta do app
@@ -47,7 +49,8 @@ def get_log_dir() -> str:
     else:
         local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
         path = os.path.join(local, "PSExecGUI", "logs")
-    os.makedirs(path, exist_ok=True)
+    if create:
+        os.makedirs(path, exist_ok=True)
     return path
 
 
@@ -59,13 +62,31 @@ def get_app_log_path() -> str:
     return os.path.join(get_log_dir(), APP_LOG_FILENAME)
 
 
+def is_file_logging_enabled() -> bool:
+    """Se True, grava app.log / exec_history.log nesta sessão."""
+    return _file_logging_enabled
+
+
+def set_file_logging_enabled(enabled: bool) -> None:
+    """Liga/desliga gravação em arquivo para a sessão atual (não persiste)."""
+    global _file_logging_enabled
+    enabled = bool(enabled)
+    if enabled == _file_logging_enabled:
+        return
+    _file_logging_enabled = enabled
+    if enabled:
+        _ensure_file_handler()
+    else:
+        _remove_file_handlers()
+
+
 def configure_logging(level: int = logging.INFO) -> logging.Logger:
     """
     Configura o logger da aplicação.
 
-    O FileHandler grava em ``app.log`` (diagnóstico). O histórico de operações
-    (``exec_history.log``) é escrito **somente** por ``_append_history_line`` /
-    ``log_operation`` — nunca pelo FileHandler, evitando duplicação.
+    Por padrão **não** cria FileHandler (log em arquivo desligado).
+    O histórico de operações (``exec_history.log``) é escrito **somente** por
+    ``_append_history_line`` / ``log_operation`` quando o log em arquivo está ativo.
     """
     global _configured
     logger = logging.getLogger(_LOGGER_NAME)
@@ -73,21 +94,12 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
         return logger
     logger.setLevel(level)
     logger.propagate = False
-
-    fmt = logging.Formatter(
-        "[%(asctime)s] %(levelname)s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    try:
-        fh = logging.FileHandler(get_app_log_path(), encoding="utf-8")
-        fh.setFormatter(fmt)
-        fh.setLevel(level)
-        logger.addHandler(fh)
-    except OSError:
-        pass
-
+    # Sem handler de arquivo até o usuário habilitar na sessão
+    if not logger.handlers:
+        logger.addHandler(logging.NullHandler())
     _configured = True
+    if _file_logging_enabled:
+        _ensure_file_handler()
     return logger
 
 
@@ -97,8 +109,39 @@ def get_logger() -> logging.Logger:
     return logging.getLogger(_LOGGER_NAME)
 
 
+def _ensure_file_handler() -> None:
+    logger = get_logger()
+    for h in logger.handlers:
+        if isinstance(h, logging.FileHandler):
+            return
+    try:
+        fmt = logging.Formatter(
+            "[%(asctime)s] %(levelname)s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        fh = logging.FileHandler(get_app_log_path(), encoding="utf-8")
+        fh.setFormatter(fmt)
+        fh.setLevel(logger.level)
+        logger.addHandler(fh)
+    except OSError:
+        pass
+
+
+def _remove_file_handlers() -> None:
+    logger = logging.getLogger(_LOGGER_NAME)
+    for h in list(logger.handlers):
+        if isinstance(h, logging.FileHandler):
+            logger.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+
+
 def _append_history_line(text: str) -> None:
     """Única função que escreve em exec_history.log."""
+    if not _file_logging_enabled:
+        return
     try:
         path = get_history_log_path()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -119,7 +162,8 @@ def log_operation(
     """
     Registra uma operação já sanitizada (única entrada no histórico).
 
-    Escreve uma vez em ``exec_history.log`` e espelha no logger (``app.log``).
+    Escreve em ``exec_history.log`` e ``app.log`` somente se o log em arquivo
+    estiver habilitado nesta sessão.
     """
     safe_detail = redact_command_text(detail or "", passwords=passwords)
     parts = [operation]
@@ -128,8 +172,9 @@ def log_operation(
     if exit_code is not None:
         parts.append(f"exit_code={exit_code}")
     message = " | ".join(parts)
-    get_logger().log(level, message)
-    _append_history_line(message)
+    if _file_logging_enabled:
+        get_logger().log(level, message)
+        _append_history_line(message)
     return message
 
 
@@ -143,13 +188,15 @@ def append_history(
     Preferir ``log_operation`` para operações tipadas. Não chamar ambos para
     a mesma operação.
     """
+    if not _file_logging_enabled:
+        return
     safe = redact_command_text(text or "", passwords=passwords)
     _append_history_line(safe)
 
 
 def reset_logging_for_tests() -> None:
     """Reinicia estado do logger (apenas testes)."""
-    global _configured
+    global _configured, _file_logging_enabled
     logger = logging.getLogger(_LOGGER_NAME)
     for h in list(logger.handlers):
         logger.removeHandler(h)
@@ -158,3 +205,4 @@ def reset_logging_for_tests() -> None:
         except Exception:
             pass
     _configured = False
+    _file_logging_enabled = False

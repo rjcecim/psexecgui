@@ -414,15 +414,14 @@ class RustDeskService:
         return "couldn't access" in low or "couldnt access" in low
 
     def find_local_rustdesk(self) -> str:
-        candidates = [r"C:\PSTools\rustdesk.exe"]
-        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
-        pfx86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-        candidates.append(os.path.join(pf, "RustDesk", "rustdesk.exe"))
-        candidates.append(os.path.join(pfx86, "RustDesk", "rustdesk.exe"))
-        for c in candidates:
-            if os.path.isfile(c):
-                return c
-        return "rustdesk.exe"
+        from utils.pstools import probe_rustdesk_local, rustdesk_local_candidates
+
+        info = probe_rustdesk_local()
+        if info.get("found"):
+            return str(info["path"])
+        # Fallback: primeiro candidato conhecido / PATH
+        candidates = rustdesk_local_candidates()
+        return candidates[0] if candidates else "rustdesk.exe"
 
     def open_local_connect(self, rustdesk_id: str) -> Tuple[bool, str]:
         from core.win_cmd import popen_argv

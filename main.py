@@ -18,6 +18,7 @@ from ui.tabs.powershell import PowerShellTab
 from ui.tabs.cmd import CmdTab
 from ui.tabs.psinfo import PsInfoTab
 from ui.tabs.appsearch import AppSearchTab
+from ui.tabs.settings import SettingsTab
 from ui.mica import enable_mica_for_widget
 from ui.branding import APP_DISPLAY_NAME, APP_NAME, APP_VERSION, ORG_NAME, app_icon, app_mark_pixmap
 from services.ops import (
@@ -27,7 +28,7 @@ from services.ops import (
     RustDeskService,
 )
 from utils.app_logging import append_history, configure_logging
-from utils.pstools import PSTOOLS_DIR
+from utils.pstools import get_pstools_dir
 from utils.redaction import redact_command_text
 
 from ui.style import ICON_FONT_PT, make_icon_button
@@ -161,6 +162,7 @@ class MainWindow(QMainWindow):
         self.psexec_tab = PsExecTab(log_output=self.log_output)
         self.psinfo_tab = None
         self.appsearch_tab = None
+        self.settings_tab = None
         self.msi_tab = MsiTab()
         self.robocopy_tab = RobocopyTab()
         self.powershell_tab = PowerShellTab()
@@ -222,6 +224,7 @@ class MainWindow(QMainWindow):
         # Conexões
         self.file_selector.fileSelected.connect(self.on_file_selected)
         self.file_selector.appSearchRequested.connect(self.open_appsearch_tab)
+        self.file_selector.settingsRequested.connect(self.open_settings_tab)
         self.psexec_tab.host_edit.textChanged.connect(self.update_command)
         self.psexec_tab.openPsInfoRequested.connect(self.open_psinfo_tab)
         self.psexec_tab.openRustDeskRequested.connect(self.on_rustdesk_clicked)
@@ -302,7 +305,7 @@ class MainWindow(QMainWindow):
     def _build_psexec_exe(self) -> str:
         from services.ops import resolve_psexec_exe
 
-        return resolve_psexec_exe(PSTOOLS_DIR)
+        return resolve_psexec_exe(get_pstools_dir())
 
     def on_rustdesk_clicked(self) -> None:
         """
@@ -344,7 +347,7 @@ class MainWindow(QMainWindow):
         def build_spec(remote_path: str):
             return svc.build_get_id_spec(
                 host=host,
-                pstools_path=PSTOOLS_DIR,
+                pstools_path=get_pstools_dir(),
                 creds=self._rustdesk_creds or CredentialContext(),
                 remote_path=remote_path,
             )
@@ -550,7 +553,7 @@ class MainWindow(QMainWindow):
                 host=host,
                 remote_cmd=remote_cmd,
                 app_label=app_label,
-                pstools_path=PSTOOLS_DIR,
+                pstools_path=get_pstools_dir(),
                 creds=creds,
                 log_tag=log_tag,
                 log_fn=self.log_output.append_log,
@@ -558,8 +561,29 @@ class MainWindow(QMainWindow):
         finally:
             creds.clear()
 
+    def open_settings_tab(self) -> None:
+        """Cria a aba Configurações sob demanda e foca nela."""
+        if self.settings_tab is not None:
+            idx = self.tabs.indexOf(self.settings_tab)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
+                self._update_psinfo_mode_ui()
+                return
+
+        self.settings_tab = SettingsTab()
+        self.settings_tab.pstoolsPathChanged.connect(self._on_pstools_path_changed)
+        self.tabs.addTab(self.settings_tab, self.tr("Configurações"))
+        idx = self.tabs.indexOf(self.settings_tab)
+        self.tabs.tabBar().setTabData(idx, "\uE713")  # Settings / engrenagem
+        self._refresh_tab_bar_layout()
+        self.tabs.setCurrentIndex(idx)
+        self._update_psinfo_mode_ui()
+
+    def _on_pstools_path_changed(self, _path: str) -> None:
+        self.update_command()
+
     def _on_tab_changed(self, _index: int) -> None:
-        # Se o usuário saiu da aba PsInfo / Pesquisa, encerrá-la (remover a aba)
+        # Se o usuário saiu da aba PsInfo / Pesquisa / Configurações, encerrá-la
         prev = self._last_tab_widget
         current = self.tabs.currentWidget()
         if self.psinfo_tab is not None:
@@ -576,6 +600,13 @@ class MainWindow(QMainWindow):
                     self.tabs.removeTab(idx)
                 self.appsearch_tab.deleteLater()
                 self.appsearch_tab = None
+        if self.settings_tab is not None:
+            if prev == self.settings_tab and current != self.settings_tab:
+                idx = self.tabs.indexOf(self.settings_tab)
+                if idx != -1:
+                    self.tabs.removeTab(idx)
+                self.settings_tab.deleteLater()
+                self.settings_tab = None
         self._update_psinfo_mode_ui()
         self._last_tab_widget = self.tabs.currentWidget()
         # Aba PowerShell/CMD ativa muda o método de montagem do comando
@@ -816,9 +847,10 @@ class MainWindow(QMainWindow):
         if remote_cmd in ['cmd', 'cmd.exe']:
             show_cmd_tab = True
             cmd_by_file = False
-        # Remover abas dinâmicas, preservando PsExec e (se existirem) PsInfo / Pesquisa
+        # Remover abas dinâmicas, preservando PsExec e abas especiais sob demanda
         psinfo_widget = self.psinfo_tab
         appsearch_widget = self.appsearch_tab
+        settings_widget = self.settings_tab
         for i in range(self.tabs.count() - 1, -1, -1):
             w = self.tabs.widget(i)
             if w is self.psexec_tab:
@@ -827,11 +859,13 @@ class MainWindow(QMainWindow):
                 continue
             if appsearch_widget is not None and w is appsearch_widget:
                 continue
+            if settings_widget is not None and w is settings_widget:
+                continue
             self.tabs.removeTab(i)
 
-        # Índice onde os tabs dinâmicos serão inseridos (antes de PsInfo/Pesquisa, se existirem)
+        # Índice onde os tabs dinâmicos serão inseridos (antes das abas especiais)
         insert_at = self.tabs.count()
-        for special in (psinfo_widget, appsearch_widget):
+        for special in (psinfo_widget, appsearch_widget, settings_widget):
             if special is None:
                 continue
             idx = self.tabs.indexOf(special)
@@ -969,7 +1003,7 @@ class MainWindow(QMainWindow):
             self._updating_remote_cmd = False
             psexec_params = {
                 'host': self.psexec_tab.host_edit.text(),
-                'psexec_path': PSTOOLS_DIR,
+                'psexec_path': get_pstools_dir(),
                 'remote_cmd': self.psexec_tab.remote_cmd_edit.text(),
                 'user': self.psexec_tab.user_edit.text(),
                 # Senha NÃO persiste no CommandBuilder — só presença para preview
@@ -1002,7 +1036,7 @@ class MainWindow(QMainWindow):
             self.psexec_tab.remote_cmd_edit.setReadOnly(False)
             psexec_params = {
                 'host': self.psexec_tab.host_edit.text(),
-                'psexec_path': PSTOOLS_DIR,
+                'psexec_path': get_pstools_dir(),
                 'remote_cmd': self.psexec_tab.remote_cmd_edit.text(),
                 'user': self.psexec_tab.user_edit.text(),
                 # Senha NÃO persiste no CommandBuilder — só presença para preview
