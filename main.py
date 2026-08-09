@@ -1,7 +1,7 @@
 import sys
 import os
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QTabWidget, QPushButton,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QTabWidget,
     QHBoxLayout, QCheckBox, QLabel, QTabBar, QStyle, QStyleOptionTab, QSizePolicy
 )
 from PyQt6.QtCore import QCoreApplication, Qt, QRect, QSize
@@ -27,11 +27,10 @@ from services.ops import (
     RustDeskService,
 )
 from utils.app_logging import append_history, configure_logging
+from utils.pstools import PSTOOLS_DIR
 from utils.redaction import redact_command_text
 
-from ui.style import ICON_FONT_PT
-
-_MDL2_FONT = QFont("Segoe MDL2 Assets", ICON_FONT_PT)
+from ui.style import ICON_FONT_PT, make_icon_button
 
 
 class _Mdl2TabBar(QTabBar):
@@ -126,38 +125,6 @@ class _Mdl2TabBar(QTabBar):
                 )
 
 
-def _action_button(icon_char: str, tooltip: str, parent=None):
-    """Botão apenas com char Unicode (sem texto), tamanho fixo e bem proporcionado."""
-    btn = QPushButton(icon_char, parent)
-    btn.setToolTip(tooltip)
-    btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setFont(_MDL2_FONT)
-    btn.setFixedSize(40, 40)
-    btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-    btn.setStyleSheet("""
-        QPushButton {
-            border: 1px solid palette(mid);
-            border-radius: 6px;
-            background: palette(button);
-            color: palette(highlight);
-            padding: 0;
-            min-width: 40px;
-            min-height: 40px;
-        }
-        QPushButton:hover {
-            background: palette(light);
-            border-color: palette(highlight);
-        }
-        QPushButton:pressed {
-            background: palette(dark);
-        }
-        QPushButton:disabled {
-            color: palette(mid);
-            background: palette(button);
-        }
-    """)
-    return btn
-
 # Tradução futura: strings em português
 # Classe principal da janela do aplicativo
 class MainWindow(QMainWindow):
@@ -210,14 +177,14 @@ class MainWindow(QMainWindow):
         self.command_preview = CommandPreviewWidget()
         vbox.addWidget(self.command_preview, 1)
 
-        # Botões executar/parar/reiniciar: só char Unicode, sem texto (tooltip para acessibilidade)
+        # Botões executar/parar/reiniciar: mesmo tamanho/estilo do RustDesk e demais ícones
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         # \uE768 = Play, \uE71A = Stop, \uE72C = Refresh (Segoe MDL2 Assets)
-        self.run_button = _action_button("\uE768", self.tr("Executar"), self)
-        self.stop_button = _action_button("\uE71A", self.tr("Parar"), self)
+        self.run_button = make_icon_button("\uE768", self.tr("Executar"), parent=self)
+        self.stop_button = make_icon_button("\uE71A", self.tr("Parar"), parent=self)
         self.stop_button.setEnabled(False)
-        self.restart_button = _action_button("\uE72C", self.tr("Reiniciar"), self)
+        self.restart_button = make_icon_button("\uE72C", self.tr("Reiniciar"), parent=self)
         button_layout.addWidget(self.run_button)
         button_layout.addWidget(self.stop_button)
         button_layout.addWidget(self.restart_button)
@@ -261,7 +228,6 @@ class MainWindow(QMainWindow):
         self.psexec_tab.formLayoutChanged.connect(self._on_psexec_form_layout_changed)
         # Cards Autenticação/Desempenho já abrem recolhidos → ajusta Preview/Log
         self._on_psexec_form_layout_changed()
-        self.psexec_tab.psexec_path_edit.textChanged.connect(self.update_command)
         self.psexec_tab.user_edit.textChanged.connect(self.update_command)
         self.psexec_tab.pass_edit.textChanged.connect(self.update_command)
         # Conexões dos checkboxes de elevação
@@ -336,9 +302,7 @@ class MainWindow(QMainWindow):
     def _build_psexec_exe(self) -> str:
         from services.ops import resolve_psexec_exe
 
-        return resolve_psexec_exe(
-            (self.psexec_tab.psexec_path_edit.text() or "").strip()
-        )
+        return resolve_psexec_exe(PSTOOLS_DIR)
 
     def on_rustdesk_clicked(self) -> None:
         """
@@ -376,12 +340,11 @@ class MainWindow(QMainWindow):
 
         svc = self._rustdesk_service
         paths = list(svc.remote_paths)
-        pstools = (self.psexec_tab.psexec_path_edit.text() or "").strip()
 
         def build_spec(remote_path: str):
             return svc.build_get_id_spec(
                 host=host,
-                pstools_path=pstools,
+                pstools_path=PSTOOLS_DIR,
                 creds=self._rustdesk_creds or CredentialContext(),
                 remote_path=remote_path,
             )
@@ -535,7 +498,6 @@ class MainWindow(QMainWindow):
         self.psinfo_tab = PsInfoTab(
             log_output=self.log_output,
             host_source=self.psexec_tab.host_edit,
-            pstools_source=self.psexec_tab.psexec_path_edit,
         )
         self.psinfo_tab.uninstallRequested.connect(self._on_psinfo_uninstall)
         # PsInfo deve ser sempre a última aba
@@ -588,7 +550,7 @@ class MainWindow(QMainWindow):
                 host=host,
                 remote_cmd=remote_cmd,
                 app_label=app_label,
-                pstools_path=(self.psexec_tab.psexec_path_edit.text() or "").strip(),
+                pstools_path=PSTOOLS_DIR,
                 creds=creds,
                 log_tag=log_tag,
                 log_fn=self.log_output.append_log,
@@ -1007,7 +969,7 @@ class MainWindow(QMainWindow):
             self._updating_remote_cmd = False
             psexec_params = {
                 'host': self.psexec_tab.host_edit.text(),
-                'psexec_path': self.psexec_tab.psexec_path_edit.text(),
+                'psexec_path': PSTOOLS_DIR,
                 'remote_cmd': self.psexec_tab.remote_cmd_edit.text(),
                 'user': self.psexec_tab.user_edit.text(),
                 # Senha NÃO persiste no CommandBuilder — só presença para preview
@@ -1040,7 +1002,7 @@ class MainWindow(QMainWindow):
             self.psexec_tab.remote_cmd_edit.setReadOnly(False)
             psexec_params = {
                 'host': self.psexec_tab.host_edit.text(),
-                'psexec_path': self.psexec_tab.psexec_path_edit.text(),
+                'psexec_path': PSTOOLS_DIR,
                 'remote_cmd': self.psexec_tab.remote_cmd_edit.text(),
                 'user': self.psexec_tab.user_edit.text(),
                 # Senha NÃO persiste no CommandBuilder — só presença para preview

@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 from typing import Sequence
 
+# Pasta fixa das PSTools (PsExec, PsInfo, etc.)
+PSTOOLS_DIR = r"C:\PSTools"
+
 
 def normalize_pstools_dir(path: str) -> str:
     """

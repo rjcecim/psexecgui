@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QPushButton
 from PyQt6.QtGui import QFont
 
 # Tipografia: uma fonte de UI, uma monoespaçada para comandos/log, e tamanho dos ícones
@@ -17,6 +18,38 @@ CARD_GRID_VERTICAL_SPACING = 4
 
 # Altura visual única dos campos de texto (inclui borda de 1px)
 INPUT_HEIGHT = 32
+
+
+def make_icon_button(
+    icon_char: str,
+    tooltip: str = "",
+    *,
+    size: int = INPUT_HEIGHT,
+    parent=None,
+) -> QPushButton:
+    """Botão quadrado só com ícone MDL2 — tamanho padrão = INPUT_HEIGHT (ex.: RustDesk)."""
+    btn = QPushButton(icon_char, parent)
+    btn.setFont(QFont("Segoe MDL2 Assets", ICON_FONT_PT))
+    btn.setFixedSize(size, size)
+    btn.setToolTip(tooltip)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setStyleSheet(f"""
+        QPushButton {{
+            border: 1px solid palette(mid);
+            border-radius: 4px;
+            background: palette(button);
+            color: palette(highlight);
+            padding: 0;
+            min-width: {size}px;
+            max-width: {size}px;
+            min-height: {size}px;
+            max-height: {size}px;
+        }}
+        QPushButton:hover {{ background: palette(light); }}
+        QPushButton:pressed {{ background: palette(dark); }}
+        QPushButton:disabled {{ color: palette(mid); }}
+    """)
+    return btn
 
 
 def apply_ui_defaults(app: QApplication) -> None:

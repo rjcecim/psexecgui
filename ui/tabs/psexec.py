@@ -1,16 +1,71 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGridLayout, QLineEdit, QComboBox, QSpinBox,
-    QCheckBox, QHBoxLayout, QLabel, QPushButton, QFileDialog,
+    QCheckBox, QHBoxLayout, QLabel,
     QSizePolicy, QToolButton
 )
-from PyQt6.QtGui import QFont
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from utils.api import get_processor_groups, get_processor_count
-from ui.style import ICON_FONT_PT, CARD_GRID_VERTICAL_SPACING, INPUT_HEIGHT
+from utils.ping import is_valid_host, normalize_host, ping_host
+from ui.style import (
+    CARD_GRID_VERTICAL_SPACING,
+    INPUT_HEIGHT,
+    SIZE_UI_SMALL,
+    make_icon_button,
+)
 from utils.validator import AffinityValidator
 from ui.widgets.card import CardWidget
 from ui.widgets.flow import FlowLayout
-import os
+
+
+# Cores da bolinha de status do host
+_STATUS_COLORS = {
+    "idle": "#9AA0A6",       # cinza — sem host
+    "checking": "#F9AB00",   # amarelo — verificando
+    "online": "#34A853",     # verde — online
+    "offline": "#EA4335",    # vermelho — offline
+    "invalid": "#E8710A",    # laranja — host inválido
+}
+
+
+class _StatusDot(QWidget):
+    """Bolinha colorida de status (online/offline/etc.)."""
+
+    def __init__(self, parent=None, diameter: int = 10):
+        super().__init__(parent)
+        self._color = QColor(_STATUS_COLORS["idle"])
+        self.setFixedSize(diameter, diameter)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_color(self, color: str) -> None:
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._color)
+        painter.drawEllipse(0, 0, self.width(), self.height())
+        painter.end()
+
+
+class _HostStatusWorker(QThread):
+    """Ping em background; emite o host consultado e se está online."""
+
+    result = pyqtSignal(str, bool)
+
+    def __init__(self, host: str, parent=None):
+        super().__init__(parent)
+        self._host = host
+
+    def run(self) -> None:
+        online, _ = ping_host(self._host)
+        self.result.emit(self._host, online)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -25,27 +80,6 @@ def _make_label(text: str) -> QLabel:
     # opacidade reduzida via stylesheet
     lbl.setStyleSheet("QLabel#fieldLabel { color: palette(windowText); opacity: 0.75; }")
     return lbl
-
-
-def _icon_button(icon_char: str, tooltip: str = "", size: int = INPUT_HEIGHT) -> QPushButton:
-    btn = QPushButton(icon_char)
-    font = QFont("Segoe MDL2 Assets", ICON_FONT_PT)
-    btn.setFont(font)
-    btn.setFixedSize(size, size)
-    btn.setToolTip(tooltip)
-    btn.setStyleSheet("""
-        QPushButton {
-            border: 1px solid palette(mid);
-            border-radius: 4px;
-            background: palette(button);
-            color: palette(highlight);
-            padding: 0;
-        }
-        QPushButton:hover { background: palette(light); }
-        QPushButton:pressed { background: palette(dark); }
-        QPushButton:disabled { color: palette(mid); }
-    """)
-    return btn
 
 
 def _add_row(grid: QGridLayout, row: int, label_text: str, widget: QWidget):
@@ -135,6 +169,12 @@ class PsExecTab(QWidget):
     def __init__(self, parent=None, log_output=None):
         super().__init__(parent)
         self.log_output = log_output
+        self._host_status_worker: Optional[_HostStatusWorker] = None
+        self._host_status_wanted = ""
+        self._host_status_timer = QTimer(self)
+        self._host_status_timer.setSingleShot(True)
+        self._host_status_timer.setInterval(550)
+        self._host_status_timer.timeout.connect(self._check_host_status)
 
         # Formulário: altura = conteúdo (sem stretch). Sobra vertical fica
         # para Pré-visualização e Log no layout da janela principal.
@@ -148,27 +188,6 @@ class PsExecTab(QWidget):
         card1.set_collapsible(True, collapsed=False)
         g1 = _grid_in_card(card1)
 
-        # PSTools (pasta com PsExec.exe e PsInfo)
-        psexec_row = QHBoxLayout()
-        psexec_row.setSpacing(4)
-        psexec_row.setContentsMargins(0, 0, 0, 0)
-        self.psexec_path_edit = QLineEdit()
-        self.psexec_path_edit.setPlaceholderText(
-            self.tr(r"Pasta das PSTools (ex: C:\PSTools\)")
-        )
-        self.psexec_path_edit.setText("C:\\PSTools\\")
-        self.psexec_path_edit.setToolTip(
-            self.tr("Pasta onde estão PsExec.exe e PsInfo (PsInfo64.exe / PsInfo.exe)")
-        )
-        self.psexec_browse_button = _icon_button("\uED25", self.tr("Procurar pasta PSTools"))
-        self.psexec_browse_button.clicked.connect(self.browse_psexec)
-        psexec_row.addWidget(self.psexec_path_edit)
-        psexec_row.addWidget(self.psexec_browse_button)
-        psexec_container = QWidget()
-        psexec_container.setLayout(psexec_row)
-        psexec_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_row(g1, 0, self.tr("PSTools"), psexec_container)
-
         # Host remoto
         host_row = QHBoxLayout()
         host_row.setSpacing(4)
@@ -176,21 +195,38 @@ class PsExecTab(QWidget):
         host_clear_container, self.host_edit = _line_edit_with_clear_icon()
         self.host_edit.setPlaceholderText("ex: 192.168.1.100 ou computador.local")
         self.host_edit.setToolTip(self.tr("Nome ou IP do computador remoto"))
-        self.ping_button = _icon_button("\uEA18", self.tr("Ping para o host"))
-        self.ping_button.clicked.connect(self.ping_host)
-        self.psinfo_button = _icon_button("\uE946", self.tr("Abrir PsInfo (inventário)"))
+        self.psinfo_button = make_icon_button("\uE946", self.tr("Abrir PsInfo (inventário)"))
         self.psinfo_button.clicked.connect(self.openPsInfoRequested.emit)
         # \uE8B7 (Copy) já usado em Robocopy; aqui usamos \uE774 (Link) como ação de conexão
-        self.rustdesk_button = _icon_button("\uE774", self.tr("Conectar via RustDesk"))
+        self.rustdesk_button = make_icon_button("\uE774", self.tr("Conectar via RustDesk"))
         self.rustdesk_button.clicked.connect(self.openRustDeskRequested.emit)
         host_row.addWidget(host_clear_container)
-        host_row.addWidget(self.ping_button)
         host_row.addWidget(self.psinfo_button)
         host_row.addWidget(self.rustdesk_button)
         host_container = QWidget()
         host_container.setLayout(host_row)
         host_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _add_row(g1, 1, self.tr("Host remoto"), host_container)
+        _add_row(g1, 0, self.tr("Host remoto"), host_container)
+
+        # Status (legenda com bolinha abaixo do host)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        status_row.setContentsMargins(2, 0, 0, 0)
+        self.host_status_dot = _StatusDot()
+        self.host_status_label = QLabel()
+        self.host_status_label.setObjectName("hostStatusCaption")
+        self.host_status_label.setStyleSheet(
+            f"QLabel#hostStatusCaption {{ color: palette(mid); font-size: {SIZE_UI_SMALL}pt; }}"
+        )
+        status_row.addWidget(self.host_status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_row.addWidget(self.host_status_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_row.addStretch()
+        status_container = QWidget()
+        status_container.setLayout(status_row)
+        status_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        _add_row(g1, 1, self.tr("Status"), status_container)
+        self._set_host_status("idle")
+        self.host_edit.textChanged.connect(self._on_host_text_changed)
 
         # Comando remoto
         remote_cmd_container, self.remote_cmd_edit = _line_edit_with_clear_icon()
@@ -458,35 +494,79 @@ class PsExecTab(QWidget):
         if 0 <= idx < len(self._priority_tooltips):
             self.priority_combo.setToolTip(self._priority_tooltips[idx])
 
-    def browse_psexec(self):
-        start = (self.psexec_path_edit.text() or r"C:\PSTools").strip()
-        if start.lower().endswith(".exe"):
-            start = os.path.dirname(start) or r"C:\PSTools"
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            self.tr("Selecionar pasta PSTools"),
-            start if os.path.isdir(start) else r"C:\PSTools",
-        )
-        if folder:
-            # Mantém barra final para deixar claro que é pasta
-            if not folder.endswith(("\\", "/")):
-                folder = folder + "\\"
-            self.psexec_path_edit.setText(folder)
+    def _set_host_status(self, state: str, text: str | None = None) -> None:
+        color = _STATUS_COLORS.get(state, _STATUS_COLORS["idle"])
+        self.host_status_dot.set_color(color)
+        labels = {
+            "idle": self.tr("Aguardando host"),
+            "checking": self.tr("Verificando…"),
+            "online": self.tr("Online"),
+            "offline": self.tr("Offline"),
+            "invalid": self.tr("Host inválido"),
+        }
+        caption = text if text is not None else labels.get(state, "")
+        self.host_status_label.setText(caption)
+        self.host_status_dot.setToolTip(caption)
+        self.host_status_label.setToolTip(caption)
 
-    def ping_host(self):
-        host = self.host_edit.text().strip()
+    def _on_host_text_changed(self, _text: str = "") -> None:
+        host = normalize_host(self.host_edit.text())
+        self._host_status_wanted = host
         if not host:
-            if self.log_output:
-                self.log_output.append_log(self.tr("[PING] Por favor, insira um host para ping."))
+            self._host_status_timer.stop()
+            self._set_host_status("idle")
             return
-        # Validação básica: evita injeção via shell (não usamos shell=True)
-        if any(ch in host for ch in ('&', '|', '<', '>', '^', '"', "'", '%')):
-            if self.log_output:
-                self.log_output.append_log(self.tr("[PING] Host inválido."))
+        if not is_valid_host(host):
+            self._host_status_timer.stop()
+            self._set_host_status("invalid")
             return
-        try:
-            from core.win_cmd import open_external_cmd_k_argv
-            open_external_cmd_k_argv(["ping", "-n", "4", "-w", "1000", host])
-        except Exception as exc:
-            if self.log_output:
-                self.log_output.append_log(f"[PING] Erro ao executar ping: {exc}")
+        self._set_host_status("checking")
+        self._host_status_timer.start()
+
+    def _check_host_status(self) -> None:
+        host = normalize_host(self.host_edit.text())
+        self._host_status_wanted = host
+        if not host:
+            self._set_host_status("idle")
+            return
+        if not is_valid_host(host):
+            self._set_host_status("invalid")
+            return
+
+        self._set_host_status("checking")
+        worker = self._host_status_worker
+        if worker is not None and worker.isRunning():
+            return
+
+        self._start_host_status_worker(host)
+
+    def _start_host_status_worker(self, host: str) -> None:
+        self._host_status_worker = _HostStatusWorker(host, self)
+        self._host_status_worker.result.connect(self._on_host_status_result)
+        self._host_status_worker.finished.connect(self._on_host_status_worker_finished)
+        self._host_status_worker.start()
+
+    def _on_host_status_result(self, host: str, online: bool) -> None:
+        wanted = self._host_status_wanted
+        if host.casefold() != (wanted or "").casefold():
+            return
+        current = normalize_host(self.host_edit.text())
+        if host.casefold() != current.casefold():
+            return
+        self._set_host_status("online" if online else "offline")
+
+    def _on_host_status_worker_finished(self) -> None:
+        worker = self._host_status_worker
+        finished_host = getattr(worker, "_host", "") if worker is not None else ""
+        self._host_status_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+        current = normalize_host(self.host_edit.text())
+        if (
+            current
+            and is_valid_host(current)
+            and current.casefold() != (finished_host or "").casefold()
+        ):
+            self._set_host_status("checking")
+            self._start_host_status_worker(current)
