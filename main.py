@@ -877,36 +877,21 @@ class MainWindow(QMainWindow):
         return row
 
     def _apply_initial_geometry(self):
-        """
-        Define um tamanho inicial dinâmico baseado no conteúdo (sizeHint),
-        com limites seguros pela tela. Isso permite uma janela mais estreita
-        quando os conteúdos (ex: Flags) conseguem quebrar linha.
-        """
+        """Abre em 720×960 (reduz se a área útil da tela for menor)."""
         screen = QApplication.primaryScreen()
         if not screen:
-            self.resize(980, 700)
+            self.resize(720, 960)
             return
 
         avail = screen.availableGeometry()
-        # Pede ao Qt o tamanho ideal do layout atual
-        self.centralWidget().adjustSize()
-        self.adjustSize()
-        hint = self.sizeHint()
-
-        min_w = 760
-        min_h = 620
-        max_w = int(avail.width() * 0.92)
-        max_h = int(avail.height() * 0.92)
-
-        w = max(min_w, hint.width())
-        h = max(min_h, hint.height())
-        w = min(w, max_w)
-        h = min(h, max_h)
-
+        w = min(720, avail.width() - 20)
+        h = min(960, avail.height() - 20)
+        w = max(400, w)
+        h = max(400, h)
         self.resize(w, h)
-        rect = self.frameGeometry()
-        rect.moveCenter(avail.center())
-        self.move(rect.topLeft())
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.y() + (avail.height() - h) // 2
+        self.move(x, y)
 
     def on_file_selected(self, selection):
         # selection: {'mode': 'file'|'folder', 'file': caminho, 'folder': caminho ou None}

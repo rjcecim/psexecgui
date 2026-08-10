@@ -6,13 +6,12 @@ from typing import List, Optional
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLineEdit,
-    QFileDialog,
     QSizePolicy,
     QPushButton,
     QLabel,
@@ -25,7 +24,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from ui.style import ICON_FONT_PT, INPUT_HEIGHT
+from ui.style import ICON_FONT_PT, INPUT_HEIGHT, SIZE_UI_SMALL
 from ui.widgets.card import CardWidget, grid_in_card, add_row, make_field_label
 from utils.psinfo import (
     InstalledApp,
@@ -33,8 +32,7 @@ from utils.psinfo import (
     describe_uninstall,
 )
 from utils.app_catalog import resolve_uninstall_extras
-from utils.hosts import load_hosts_file, app_dir as _hosts_app_dir
-from utils.app_settings import SETTINGS_SAVE_ERROR_MSG, SettingsWriteError
+from utils.hosts import load_hosts_file
 from utils.remote_registry_query import (
     REMOTE_REGISTRY_TIMEOUT_SECONDS,
     run_remote_inventory_batch,
@@ -44,12 +42,38 @@ from utils.search_settings import (
     MIN_SEARCH_MAX_WORKERS,
     get_search_max_workers,
     resolve_configured_hosts_path,
-    set_search_hosts_path,
 )
 
+# Mesma paleta do status de conexão (aba PsExec)
+_STATUS_COLORS = {
+    "idle": "#9AA0A6",
+    "ok": "#34A853",
+    "warn": "#F9AB00",
+    "err": "#EA4335",
+    "invalid": "#E8710A",
+}
 
-def _app_dir() -> str:
-    return _hosts_app_dir()
+
+class _StatusDot(QWidget):
+    """Bolinha colorida de status (como o status de conexão do host)."""
+
+    def __init__(self, parent=None, diameter: int = 10):
+        super().__init__(parent)
+        self._color = QColor(_STATUS_COLORS["idle"])
+        self.setFixedSize(diameter, diameter)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_color(self, color: str) -> None:
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._color)
+        painter.drawEllipse(0, 0, self.width(), self.height())
+        painter.end()
 
 
 def _icon_button(icon_char: str, tooltip: str = "", size: int = INPUT_HEIGHT) -> QPushButton:
@@ -225,18 +249,23 @@ class AppSearchTab(QWidget):
         app_lay.addWidget(self.stop_btn)
         add_row(grid, 0, self.tr("Aplicativo a pesquisar"), app_wrap)
 
-        hosts_wrap = QWidget()
-        hosts_lay = QHBoxLayout(hosts_wrap)
-        hosts_lay.setContentsMargins(0, 0, 0, 0)
-        hosts_lay.setSpacing(6)
-        self.hosts_path_edit = QLineEdit()
-        self.hosts_path_edit.setReadOnly(True)
-        self.hosts_path_edit.setPlaceholderText(self.tr("Arquivo hosts.json"))
-        self.browse_hosts_btn = _icon_button("\uED43", self.tr("Selecionar arquivo JSON de hosts"))
-        self.browse_hosts_btn.clicked.connect(self._browse_hosts_file)
-        hosts_lay.addWidget(self.hosts_path_edit, 1)
-        hosts_lay.addWidget(self.browse_hosts_btn)
-        add_row(grid, 1, self.tr("Arquivo de hosts"), hosts_wrap)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        status_row.setContentsMargins(2, 0, 0, 0)
+        self.hosts_status_dot = _StatusDot()
+        self.hosts_status_lbl = QLabel("")
+        self.hosts_status_lbl.setObjectName("hostsStatus")
+        self.hosts_status_lbl.setStyleSheet(
+            f"QLabel#hostsStatus {{ color: palette(mid); font-size: {SIZE_UI_SMALL}pt; }}"
+        )
+        status_row.addWidget(self.hosts_status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_row.addWidget(self.hosts_status_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_row.addStretch()
+        status_wrap = QWidget()
+        status_wrap.setLayout(status_row)
+        status_wrap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        status_wrap.setToolTip(self.tr("Definido em Configurações → hosts.json"))
+        add_row(grid, 1, self.tr("Status"), status_wrap)
 
         self.progress = QProgressBar()
         self.progress.setMinimum(0)
@@ -363,49 +392,46 @@ class AppSearchTab(QWidget):
         root.addWidget(results_card, 1)
 
         self.destroyed.connect(self._abort_worker)
-        self._init_hosts_file()
+        self.refresh_hosts_status()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.refresh_hosts_status()
 
     def _ui_alive(self) -> bool:
         return not sip.isdeleted(self)
 
-    def _init_hosts_file(self) -> None:
-        path, _origin = resolve_configured_hosts_path()
-        if path and os.path.isfile(path):
-            self._set_hosts_path(path, persist=False)
-        else:
-            self.hosts_path_edit.clear()
-            self.hosts_path_edit.setPlaceholderText(
-                self.tr(
-                    "hosts.json não encontrado — selecione um arquivo "
-                    "(veja hosts.example.json)"
-                )
-            )
+    def _set_hosts_status(self, state: str, text: str) -> None:
+        color = _STATUS_COLORS.get(state, _STATUS_COLORS["idle"])
+        self.hosts_status_dot.set_color(color)
+        self.hosts_status_lbl.setText(text)
+        self.hosts_status_dot.setToolTip(text)
+        self.hosts_status_lbl.setToolTip(text)
 
-    def _set_hosts_path(self, path: str, *, persist: bool = True) -> None:
+    def refresh_hosts_status(self) -> None:
+        """Atualiza legenda a partir das Configurações (sem editar o caminho aqui)."""
+        path, origin = resolve_configured_hosts_path()
+        if origin == "missing" or not path or not os.path.isfile(path):
+            self._hosts_path = ""
+            self._set_hosts_status("err", self.tr("Não encontrado"))
+            return
         p = os.path.normpath(path)
-        # Windows pode devolver "c:\..."; exibir "C:\" em caixa alta
         if len(p) >= 2 and p[1] == ":":
             p = p[0].upper() + p[1:]
-        if persist:
-            try:
-                set_search_hosts_path(p)
-            except SettingsWriteError as exc:
-                msg = getattr(exc, "message", None) or SETTINGS_SAVE_ERROR_MSG
-                QMessageBox.warning(self, self.tr("Configurações"), self.tr(msg))
-                return
+        try:
+            hosts = load_hosts_file(p)
+        except Exception:
+            self._hosts_path = ""
+            self._set_hosts_status("invalid", self.tr("Arquivo inválido"))
+            return
+        if not hosts:
+            self._hosts_path = p
+            self._set_hosts_status("warn", self.tr("Encontrado — lista vazia"))
+            return
         self._hosts_path = p
-        self.hosts_path_edit.setText(self._hosts_path)
-
-    def _browse_hosts_file(self) -> None:
-        start = self._hosts_path or _app_dir()
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            self.tr("Selecionar arquivo de hosts"),
-            start,
-            self.tr("JSON (*.json)"),
+        self._set_hosts_status(
+            "ok", self.tr(f"Encontrado — {len(hosts)} host(s)")
         )
-        if path:
-            self._set_hosts_path(path)
 
     def _disconnect_worker_signals(self, w: _AppSearchWorker) -> None:
         for signal, slot in (
@@ -492,11 +518,15 @@ class AppSearchTab(QWidget):
             )
             return
 
+        self.refresh_hosts_status()
         if not self._hosts_path or not os.path.isfile(self._hosts_path):
             QMessageBox.warning(
                 self,
                 self.tr("Pesquisa de Aplicativos"),
-                self.tr("Selecione um arquivo hosts.json válido."),
+                self.tr(
+                    "hosts.json não encontrado.\n"
+                    "Configure o arquivo em Configurações."
+                ),
             )
             return
 
@@ -525,7 +555,6 @@ class AppSearchTab(QWidget):
         self.search_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.app_edit.setEnabled(False)
-        self.browse_hosts_btn.setEnabled(False)
         self.progress.setVisible(True)
         self._stats_wrap.setVisible(True)
         self.ok_count_lbl.setVisible(True)
@@ -618,7 +647,6 @@ class AppSearchTab(QWidget):
         self.search_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.app_edit.setEnabled(True)
-        self.browse_hosts_btn.setEnabled(True)
 
     def _on_search_err(self, generation: int, msg: str) -> None:
         if not self._ui_alive() or int(generation) != int(self._search_generation):

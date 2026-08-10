@@ -1,4 +1,4 @@
-"""Executor assíncrono com resultado estruturado e leitura segura de pipes."""
+"""Executor assíncrono com resultado estruturado — pipes ou ConPTY."""
 
 from __future__ import annotations
 
@@ -51,14 +51,37 @@ def _read_pipe(pipe, callback, prefix: str = "") -> str:
     return "\n".join(chunks)
 
 
+def _emit_conpty_text(
+    text: str,
+    *,
+    prefix: str,
+    on_line,
+    carry: List[str],
+) -> None:
+    """Converte pedaços ConPTY em linhas para o log (mantém leftover parcial)."""
+    if not text:
+        return
+    data = (carry[0] if carry else "") + text
+    carry.clear()
+    parts = data.split("\n")
+    if not data.endswith("\n"):
+        carry.append(parts[-1])
+        parts = parts[:-1]
+    for part in parts:
+        line = part.rstrip("\r")
+        if not line.strip():
+            continue
+        on_line(f"{prefix}{line}" if prefix else line)
+
+
 class Executor(QObject):
     """
     Executa um comando em ThreadPoolExecutor (1 worker) e emite sinais Qt.
 
-    Aceita ``CommandSpec`` / lista de argv (preferido) ou ``str`` legada.
+    ``use_conpty=True``: saída via Windows ConPTY (PsExec do botão Executar).
+    Robocopy e demais continuam em pipes CREATE_NO_WINDOW.
 
-    Serializado: uma execução por vez. ``run()`` solicita cancelamento da
-    anterior; resultados obsoletos são descartados via ``_run_generation``.
+    PsInfo, Pesquisa e Desinstalar dessas abas NÃO usam este caminho ConPTY.
 
     Cancelamento: encerra apenas o processo LOCAL. Processos remotos iniciados
     via PsExec podem continuar — ``ExecutionResult.remote_may_continue=True``.
@@ -74,6 +97,7 @@ class Executor(QObject):
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.future: Optional[Future] = None
         self.process: Optional[subprocess.Popen] = None
+        self._conpty_terminate = None
         self._cancel_requested = False
         self._last_result: Optional[ExecutionResult] = None
         self._passwords: List[str] = []
@@ -86,26 +110,23 @@ class Executor(QObject):
         *,
         passwords: Optional[Sequence[str]] = None,
         timeout: Optional[float] = None,
+        use_conpty: bool = False,
     ) -> None:
         self.stop()
         with self._lock:
             self._cancel_requested = False
+            self._conpty_terminate = None
             self._run_generation += 1
             generation = self._run_generation
             self._passwords = [p for p in (passwords or []) if p]
             self.future = self.executor.submit(
-                self._run_command, command, timeout, generation
+                self._run_command, command, timeout, generation, bool(use_conpty)
             )
         QTimer.singleShot(100, lambda: self._check_future(generation))
 
     def _normalize_argv(
         self, command: Union[str, CommandSpec, Sequence[str]]
     ) -> tuple[List[str], bool, str]:
-        """
-        Retorna (argv, is_robocopy, display_safe).
-
-        Strings legadas são convertidas via cmd.exe /c apenas quando necessário.
-        """
         if isinstance(command, CommandSpec):
             argv = command.argv
             display = command.sanitized_display(self._passwords)
@@ -131,12 +152,14 @@ class Executor(QObject):
         command: Union[str, CommandSpec, Sequence[str]],
         timeout: Optional[float],
         generation: int,
+        use_conpty: bool,
     ) -> ExecutionResult:
         result = ExecutionResult(
             started_at=datetime.now(),
             status=OperationStatus.STARTED,
         )
         result.metadata["run_generation"] = generation
+        result.metadata["conpty"] = bool(use_conpty)
         stdout_acc: List[str] = []
         stderr_acc: List[str] = []
         proc: Optional[subprocess.Popen] = None
@@ -149,6 +172,17 @@ class Executor(QObject):
                 return result.finalize()
 
             prefix = "[ROBOCOPY] " if is_robocopy else ""
+
+            if use_conpty and not is_robocopy:
+                return self._run_conpty(
+                    argv,
+                    result=result,
+                    generation=generation,
+                    timeout=timeout,
+                    prefix=prefix,
+                    stdout_acc=stdout_acc,
+                )
+
             creationflags = CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
 
             def on_out(line: str) -> None:
@@ -182,7 +216,6 @@ class Executor(QObject):
 
             with self._lock:
                 if generation != self._run_generation:
-                    # Execução substituída antes de publicar o handle
                     try:
                         proc.kill()
                     except Exception:
@@ -192,7 +225,6 @@ class Executor(QObject):
                     return result.finalize()
                 self.process = proc
 
-            # Threads leem handles estáveis do Popen local (não self.process)
             stdout_pipe = proc.stdout
             stderr_pipe = proc.stderr
 
@@ -271,6 +303,86 @@ class Executor(QObject):
                     self.process = None
                 if generation == self._run_generation:
                     self._last_result = result
+                    self._conpty_terminate = None
+
+    def _run_conpty(
+        self,
+        argv: List[str],
+        *,
+        result: ExecutionResult,
+        generation: int,
+        timeout: Optional[float],
+        prefix: str,
+        stdout_acc: List[str],
+    ) -> ExecutionResult:
+        from core.conpty import ConPtySession
+
+        session = ConPtySession(argv)
+        try:
+            session.start()
+        except FileNotFoundError:
+            msg = f"Executável não encontrado: {argv[0]}"
+            self.errorReceived.emit(msg)
+            result.exception = msg
+            result.return_code = 1
+            return result.finalize()
+        except OSError as exc:
+            safe = redact_command_text(str(exc), passwords=self._passwords)
+            msg = f"Falha ao iniciar ConPTY: {safe}"
+            self.errorReceived.emit(msg)
+            result.exception = msg
+            result.return_code = 1
+            return result.finalize()
+
+        with self._lock:
+            if generation != self._run_generation:
+                session.terminate()
+                session.close()
+                result.cancelled = True
+                result.remote_may_continue = True
+                return result.finalize()
+            self._conpty_terminate = session.terminate
+
+        carry: List[str] = []
+
+        def on_line(line: str) -> None:
+            safe_line = redact_command_text(line, passwords=self._passwords)
+            stdout_acc.append(safe_line)
+            self.outputReceived.emit(safe_line)
+
+        def on_chunk(chunk: str) -> None:
+            _emit_conpty_text(
+                chunk,
+                prefix=prefix,
+                on_line=on_line,
+                carry=carry,
+            )
+
+        try:
+            conpty_result = session.read_output_loop(
+                on_chunk,
+                should_cancel=lambda: self._cancel_requested
+                or generation != self._run_generation,
+                timeout=timeout,
+            )
+        finally:
+            if carry and carry[0].strip():
+                on_line(f"{prefix}{carry[0]}" if prefix else carry[0])
+            session.close()
+            with self._lock:
+                if generation == self._run_generation:
+                    self._conpty_terminate = None
+
+        result.stdout = "\n".join(stdout_acc)
+        result.return_code = conpty_result.return_code
+        result.cancelled = bool(conpty_result.cancelled or self._cancel_requested)
+        result.timed_out = bool(conpty_result.timed_out)
+        result.remote_may_continue = result.cancelled or result.timed_out
+        if conpty_result.exception:
+            result.exception = redact_command_text(
+                conpty_result.exception, passwords=self._passwords
+            )
+        return result.finalize()
 
     def _check_future(self, generation: int) -> None:
         with self._lock:
@@ -284,7 +396,6 @@ class Executor(QObject):
                 if not isinstance(result, ExecutionResult):
                     code = int(result) if result is not None else 1
                     result = ExecutionResult(return_code=code).finalize()
-                # Descartar resultado de geração antiga
                 if result.metadata.get("run_generation") != current_gen:
                     return
                 self._last_result = result
@@ -309,17 +420,17 @@ class Executor(QObject):
             QTimer.singleShot(100, lambda: self._check_future(generation))
 
     def stop(self) -> None:
-        """
-        Cancela a execução LOCAL.
-
-        Limitação: se o comando já disparou trabalho remoto via PsExec,
-        o processo remoto pode continuar. O resultado marca
-        ``remote_may_continue=True``.
-        """
+        """Cancela execução LOCAL (pipes ou ConPTY)."""
         with self._lock:
             self._cancel_requested = True
             proc = self.process
             fut = self.future
+            terminate_conpty = self._conpty_terminate
+        if terminate_conpty is not None:
+            try:
+                terminate_conpty()
+            except Exception:
+                pass
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
@@ -329,8 +440,6 @@ class Executor(QObject):
                 proc.kill()
             except Exception:
                 pass
-        # Não zera self.process aqui — a thread dona do Popen limpa no finally.
-        # Cancela apenas futures ainda não iniciados.
         if fut is not None and not fut.running() and not fut.done():
             fut.cancel()
 

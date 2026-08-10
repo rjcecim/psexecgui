@@ -1,4 +1,4 @@
-﻿# -*- mode: python ; coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec: gera exe sem console (so janela da aplicacao)
 
 block_cipher = None
@@ -27,6 +27,7 @@ a = Analysis(
         'services.ops',
         'core.models',
         'core.win_cmd',
+        'core.conpty',
         'multiprocessing',
         'multiprocessing.spawn',
         'multiprocessing.resource_tracker',

@@ -8,11 +8,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from core.models import CommandSpec, OperationStatus
-from core.win_cmd import (
-    open_external_console_argv,
-    open_external_console_argv_keep_open,
-    quote_for_cmd,
-)
+from core.win_cmd import open_external_console_argv_keep_open, quote_for_cmd
 from core.win_cmdline import split_windows_command_line
 from utils.app_logging import log_operation
 from utils.pstools import resolve_pstools_tool
@@ -94,9 +90,10 @@ def build_psexec_argv(
 @dataclass
 class LaunchResult:
     """
-    Resultado do *lançamento* local — não do comando remoto.
+    Resultado do *lançamento* local — não necessariamente do comando remoto.
 
-    Com terminal externo, o exit code do PsExec normalmente não é monitorado.
+    Com ConPTY (botão Executar), a saída e o exit code local são monitorados
+    pelo Executor. Desinstalação PsInfo/Pesquisa permanece em terminal externo.
     """
 
     ok: bool
@@ -108,7 +105,7 @@ class LaunchResult:
 
 
 class CommandExecutionService:
-    """Orquestra preview sanitizado + lançamento (Robocopy interno / PsExec externo)."""
+    """Orquestra preview sanitizado + Robocopy (pipes) / PsExec (ConPTY no log)."""
 
     def __init__(self, executor, log_fn: Optional[Callable[[str], None]] = None):
         self.executor = executor
@@ -147,7 +144,6 @@ class CommandExecutionService:
         displays = [s.sanitized_display(passwords) for s in plan]
         full_display = "\n".join(d for d in displays if d)
         self._log(f"[DEBUG] Comando completo: {full_display}")
-        # Única gravação no histórico para esta operação
         log_operation("execute", detail=full_display, passwords=passwords)
 
         robocopy_specs = [
@@ -170,86 +166,104 @@ class CommandExecutionService:
 
                 if is_robocopy_success(exit_code):
                     self._log(
-                        f"Robocopy OK (código {exit_code}). Iniciando PsExec..."
+                        f"Robocopy OK (código {exit_code}). Iniciando PsExec (ConPTY)..."
                     )
-                    launch = self._launch_external_psexec(px, password=password)
+                    launch = self._launch_psexec_conpty(px, password=password)
                     self._log(launch.message)
+                    if not launch.ok:
+                        if self._run_enabled_cb:
+                            self._run_enabled_cb(True)
+                        if self._stop_enabled_cb:
+                            self._stop_enabled_cb(False)
                 else:
                     self._log(
                         f"Robocopy falhou (código {exit_code}). "
                         "PsExec nao sera executado."
                     )
-                if self._run_enabled_cb:
-                    self._run_enabled_cb(True)
-                if self._stop_enabled_cb:
-                    self._stop_enabled_cb(False)
+                    if self._run_enabled_cb:
+                        self._run_enabled_cb(True)
+                    if self._stop_enabled_cb:
+                        self._stop_enabled_cb(False)
 
             self.executor.finished.connect(after_robocopy)
-            self.executor.run(rc, passwords=passwords)
+            self.executor.run(rc, passwords=passwords, use_conpty=False)
             return LaunchResult(
                 ok=True,
                 display_command=full_display,
                 robocopy_started=True,
                 message="Robocopy iniciado; PsExec pendente do resultado da cópia.",
                 status=OperationStatus.STARTED,
-                remote_monitored=False,
+                remote_monitored=True,
             )
 
         target = psexec_specs[0] if psexec_specs else plan[-1]
-        launch = self._launch_external_psexec(target, password=password)
+        if (target.metadata or {}).get("kind") == "robocopy":
+            self.executor.run(target, passwords=passwords, use_conpty=False)
+            msg = "Robocopy iniciado; saída no log."
+            self._log(msg)
+            return LaunchResult(
+                ok=True,
+                display_command=full_display,
+                message=msg,
+                status=OperationStatus.STARTED,
+                remote_monitored=True,
+            )
+
+        launch = self._launch_psexec_conpty(target, password=password)
         self._log(launch.message)
-        if self._run_enabled_cb:
-            self._run_enabled_cb(True)
-        if self._stop_enabled_cb:
-            self._stop_enabled_cb(False)
+        if not launch.ok:
+            if self._run_enabled_cb:
+                self._run_enabled_cb(True)
+            if self._stop_enabled_cb:
+                self._stop_enabled_cb(False)
         return LaunchResult(
             ok=launch.ok,
             display_command=full_display,
             message=launch.message,
             status=launch.status,
-            remote_monitored=False,
+            remote_monitored=launch.remote_monitored,
         )
 
-    def _launch_external_psexec(
+    def _launch_psexec_conpty(
         self, spec: CommandSpec, *, password: str = ""
     ) -> LaunchResult:
         """
-        Abre console externo com o comando PsExec.
+        PsExec do botão Executar: ConPTY → saída no log + exit code local.
 
-        Limitação inerente ao PsExec: com ``-p``, a senha fica na command line
-        do processo. Não é gravada em arquivo, preview ou log.
-
-        O resultado remoto NÃO é monitorado (console externo independente).
+        Limitação inerente: com ``-p``, a senha fica na command line do processo.
+        Não é gravada em arquivo/preview; o log redige eco acidental.
         """
         argv = materialize_password_in_argv(spec.argv, password)
         try:
-            open_external_console_argv(argv)
-        except FileNotFoundError:
-            msg = f"Falha ao lançar: executável não encontrado ({argv[0] if argv else '?'})."
-            return LaunchResult(
-                ok=False,
-                display_command=spec.display_command,
-                message=msg,
-                status=OperationStatus.FAILED,
+            self.executor.run(
+                CommandSpec.from_argv(
+                    argv,
+                    has_secrets=bool(password),
+                    passwords=[password] if password else None,
+                    metadata=dict(spec.metadata or {}) | {"kind": "psexec"},
+                    prefer_external_console=False,
+                ),
+                passwords=[password] if password else None,
+                use_conpty=True,
             )
-        except OSError as exc:
-            safe = redact_command_text(str(exc), passwords=[password] if password else None)
-            msg = f"Falha ao lançar processo: {safe}"
+        except Exception as exc:
+            safe = redact_command_text(
+                str(exc), passwords=[password] if password else None
+            )
+            msg = f"Falha ao lançar PsExec (ConPTY): {safe}"
             return LaunchResult(
                 ok=False,
                 display_command=spec.display_command,
                 message=msg,
                 status=OperationStatus.FAILED,
+                remote_monitored=False,
             )
         return LaunchResult(
             ok=True,
             display_command=spec.display_command,
-            message=(
-                "Execução iniciada em terminal externo; "
-                "resultado remoto não monitorado."
-            ),
+            message="Execução iniciada via ConPTY; saída no log de execução.",
             status=OperationStatus.STARTED,
-            remote_monitored=False,
+            remote_monitored=True,
         )
 
 
@@ -265,7 +279,9 @@ class RemoteUninstallService:
     """
     Desinstalação remota via PsExec (-h -s) em terminal externo.
 
-    Nunca grava senha em arquivos temporários.
+    Intencionalmente NÃO usa ConPTY — o botão Desinstalar do PsInfo/Pesquisa
+    abre console externo (janela permanece aberta). Nunca grava senha em
+    arquivos temporários.
     """
 
     def run(
@@ -331,8 +347,7 @@ class RemoteUninstallService:
         log_operation("uninstall", detail=display_cmd, passwords=creds.passwords)
 
         try:
-            # Mantém a janela aberta sem serializar o argv via cmd /k
-            # (cmd /k quebrava aspas do msiexec remoto).
+            # Terminal externo (sem ConPTY): pedido explícito para PsInfo/Pesquisa.
             open_external_console_argv_keep_open(real_argv)
             msg = (
                 f"[{log_tag}] Execução iniciada em terminal externo "

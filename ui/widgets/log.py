@@ -1,4 +1,5 @@
-from PyQt6.QtWidgets import QTextEdit, QSizePolicy
+from PyQt6.QtWidgets import QTextEdit, QSizePolicy, QToolButton
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QTextCursor
 import re
 
@@ -15,6 +16,25 @@ class LogOutputWidget(CardWidget):
         self.set_layout_stretch(1)
         self.set_expanding(True)
         self.set_collapsible(True, collapsed=False)
+
+        # Limpa só a tela (QTextEdit); não apaga o arquivo de histórico.
+        self._clear_btn = QToolButton()
+        self._clear_btn.setObjectName("cardDownload")
+        self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._clear_btn.setAutoRaise(True)
+        self._clear_btn.setFixedSize(22, 22)
+        self._clear_btn.setFont(QFont("Segoe MDL2 Assets", 10))
+        self._clear_btn.setText("\uE74D")  # Delete
+        self._clear_btn.setToolTip(self.tr("Limpar log (apenas na tela)"))
+        self._clear_btn.clicked.connect(self.clear_log)
+        header = self._header_widget.layout()
+        if header is not None:
+            idx = header.indexOf(self._toggle_btn)
+            if idx >= 0:
+                header.insertWidget(idx, self._clear_btn)
+            else:
+                header.addWidget(self._clear_btn)
 
         self.text_edit = QTextEdit()
         self.text_edit.setReadOnly(True)
