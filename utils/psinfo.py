@@ -47,9 +47,13 @@ class HostInventoryStatus:
     host: str
     ok: bool
     apps: List[InstalledApp] = field(default_factory=list)
-    # "": sucesso; invalid_host | unreachable | auth | remote_registry
+    # "": sucesso; invalid_host | unreachable | auth | remote_registry |
+    # timed_out | cancelled | internal_error
     error_kind: str = ""
     message: str = ""
+    winerror: Optional[int] = None
+    # validate | connect | enumerate | spawn | ipc | timeout | cancel | child
+    stage: str = ""
 
 
 _GUID_RE = re.compile(
@@ -288,17 +292,45 @@ def list_remote_installed_apps_status(host: str) -> HostInventoryStatus:
             apps=[],
             error_kind="invalid_host",
             message="Host inválido ou vazio.",
+            stage="validate",
         )
 
     try:
         root = winreg.ConnectRegistry(rf"\\{h}", winreg.HKEY_LOCAL_MACHINE)
     except OSError as exc:
         kind, msg = _classify_connect_error(exc)
-        return HostInventoryStatus(host=h, ok=False, apps=[], error_kind=kind, message=msg)
+        return HostInventoryStatus(
+            host=h,
+            ok=False,
+            apps=[],
+            error_kind=kind,
+            message=msg,
+            winerror=_winerror_code(exc),
+            stage="connect",
+        )
 
     try:
         apps_64 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_64KEY, "64")
         apps_32 = _apps_from_uninstall(root, winreg.KEY_READ | winreg.KEY_WOW64_32KEY, "32")
+    except OSError as exc:
+        return HostInventoryStatus(
+            host=h,
+            ok=False,
+            apps=[],
+            error_kind="remote_registry",
+            message=str(exc).strip() or "Falha ao enumerar Uninstall.",
+            winerror=_winerror_code(exc),
+            stage="enumerate",
+        )
+    except Exception as exc:  # noqa: BLE001 — classificar como internal_error
+        return HostInventoryStatus(
+            host=h,
+            ok=False,
+            apps=[],
+            error_kind="internal_error",
+            message=f"{type(exc).__name__}: {exc}",
+            stage="enumerate",
+        )
     finally:
         try:
             root.Close()
@@ -311,6 +343,7 @@ def list_remote_installed_apps_status(host: str) -> HostInventoryStatus:
         apps=_merge_arch_views(apps_64, apps_32),
         error_kind="",
         message="",
+        stage="enumerate",
     )
 
 

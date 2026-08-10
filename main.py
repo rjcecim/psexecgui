@@ -1150,7 +1150,7 @@ class MainWindow(QMainWindow):
         for tab in (getattr(self, "appsearch_tab", None), getattr(self, "psinfo_tab", None)):
             if tab is not None:
                 try:
-                    tab.shutdown()
+                    tab.shutdown(wait_ms=10000)
                 except Exception:
                     pass
         if hasattr(self, "psexec_tab") and self.psexec_tab is not None:
@@ -1174,7 +1174,13 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 if __name__ == "__main__":
+    import multiprocessing
     import traceback
+
+    # Obrigatório no Windows (spawn) e no exe PyInstaller: o filho reentra neste
+    # módulo e freeze_support despacha o worker sem abrir a UI.
+    multiprocessing.freeze_support()
+
     class StreamToLog:
         def __init__(self, log_func):
             self.log_func = log_func

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
-import sys
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from PyQt6 import sip
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -34,11 +31,14 @@ from utils.psinfo import (
     InstalledApp,
     build_uninstall_remote_cmd,
     describe_uninstall,
-    list_remote_installed_apps_status,
 )
 from utils.app_catalog import resolve_uninstall_extras
-from utils.hosts import load_hosts_file, default_hosts_path, app_dir as _hosts_app_dir
+from utils.hosts import load_hosts_file, app_dir as _hosts_app_dir
 from utils.app_settings import SETTINGS_SAVE_ERROR_MSG, SettingsWriteError
+from utils.remote_registry_query import (
+    REMOTE_REGISTRY_TIMEOUT_SECONDS,
+    run_remote_inventory_batch,
+)
 from utils.search_settings import (
     MAX_SEARCH_MAX_WORKERS,
     MIN_SEARCH_MAX_WORKERS,
@@ -85,14 +85,23 @@ class SearchHit:
 
 
 class _AppSearchWorker(QThread):
-    # done, failed, total, último host, ok (consulta bem-sucedida), error_kind
-    progress = pyqtSignal(int, int, int, str, bool, str)
-    hitsFound = pyqtSignal(list)  # List[SearchHit] do host recém-consultado
-    finished_ok = pyqtSignal(str)  # query
-    finished_aborted = pyqtSignal(str)  # query (interrupção pelo usuário)
-    finished_err = pyqtSignal(str)
+    # generation, done, failed, total, último host, ok, error_kind
+    progress = pyqtSignal(int, int, int, int, str, bool, str)
+    # generation, List[SearchHit]
+    hitsFound = pyqtSignal(int, list)
+    finished_ok = pyqtSignal(int, str)  # generation, query
+    finished_aborted = pyqtSignal(int, str)  # generation, query
+    finished_err = pyqtSignal(int, str)  # generation, msg
 
-    def __init__(self, hosts: List[str], query: str, max_workers: int = 8):
+    def __init__(
+        self,
+        hosts: List[str],
+        query: str,
+        max_workers: int = 8,
+        *,
+        generation: int = 0,
+        timeout: float = REMOTE_REGISTRY_TIMEOUT_SECONDS,
+    ):
         super().__init__()
         self.hosts = list(hosts)
         self.query = (query or "").strip()
@@ -101,79 +110,72 @@ class _AppSearchWorker(QThread):
         except (TypeError, ValueError):
             n = 8
         self.max_workers = max(MIN_SEARCH_MAX_WORKERS, min(MAX_SEARCH_MAX_WORKERS, n))
+        self.generation = int(generation)
+        self.timeout = float(timeout) if timeout else REMOTE_REGISTRY_TIMEOUT_SECONDS
         self._abort = False
 
     def abort(self) -> None:
         self._abort = True
 
-    @staticmethod
-    def _scan_host(host: str, query_cf: str) -> Tuple[str, List[SearchHit], bool, str]:
-        status = list_remote_installed_apps_status(host)
-        hits: List[SearchHit] = []
-        if status.ok:
-            for app in status.apps:
-                name = (app.display_name or "").casefold()
-                if query_cf in name:
-                    hits.append(SearchHit(host=host, app=app, host_ok=True))
-        return host, hits, status.ok, status.error_kind or ("" if status.ok else "unreachable")
-
     def run(self) -> None:
+        gen = self.generation
         try:
             q = self.query.casefold()
             if not q:
-                self.finished_err.emit("Informe o nome do aplicativo a pesquisar.")
+                self.finished_err.emit(gen, "Informe o nome do aplicativo a pesquisar.")
                 return
             if not self.hosts:
-                self.finished_err.emit("Nenhum host para consultar.")
+                self.finished_err.emit(gen, "Nenhum host para consultar.")
                 return
 
             total = len(self.hosts)
             workers = min(self.max_workers, total)
             done = 0
             failed = 0
-            executor = ThreadPoolExecutor(max_workers=workers)
-            futures = {
-                executor.submit(self._scan_host, host, q): host for host in self.hosts
-            }
-            pending = set(futures.keys())
-            try:
-                # wait(timeout) permite reagir a abort() sem ficar preso em fut.result()
-                # enquanto uma consulta Remote Registry ainda não retornou.
-                while pending and not self._abort:
-                    done_set, pending = wait(
-                        pending, timeout=0.25, return_when=FIRST_COMPLETED
-                    )
-                    if not done_set:
-                        continue
-                    for fut in done_set:
-                        if self._abort:
-                            pending.clear()
-                            break
-                        host = futures[fut]
-                        try:
-                            host, hits, ok, error_kind = fut.result()
-                        except Exception:
-                            hits = []
-                            ok = False
-                            error_kind = "unreachable"
-                        done += 1
-                        if not ok:
-                            failed += 1
-                        self.progress.emit(done, failed, total, host, ok, error_kind)
-                        if hits:
-                            self.hitsFound.emit(hits)
-            finally:
-                # Cancela futuros ainda não iniciados; workers Win32 já em voo
-                # podem continuar em segundo plano (limitação da API).
-                executor.shutdown(wait=False, cancel_futures=True)
+            saw_cancel = False
 
-            if self._abort:
-                self.finished_aborted.emit(self.query)
+            for status in run_remote_inventory_batch(
+                self.hosts,
+                max_workers=workers,
+                timeout=self.timeout,
+                should_cancel=lambda: self._abort,
+            ):
+                if self._abort and status.error_kind == "cancelled":
+                    saw_cancel = True
+                    # Não conta hosts cancelados (já iniciados) como "falha de rede";
+                    # ainda incrementa progresso para refletir vagas liberadas.
+                    done += 1
+                    self.progress.emit(
+                        gen, done, failed, total, status.host, False, "cancelled"
+                    )
+                    continue
+
+                hits: List[SearchHit] = []
+                ok = bool(status.ok)
+                error_kind = status.error_kind or ("" if ok else "internal_error")
+                if ok:
+                    for app in status.apps:
+                        name = (app.display_name or "").casefold()
+                        if q in name:
+                            hits.append(
+                                SearchHit(host=status.host, app=app, host_ok=True)
+                            )
+                done += 1
+                if not ok:
+                    failed += 1
+                self.progress.emit(
+                    gen, done, failed, total, status.host, ok, error_kind
+                )
+                if hits:
+                    self.hitsFound.emit(gen, hits)
+
+            if self._abort or saw_cancel:
+                self.finished_aborted.emit(gen, self.query)
                 return
-            self.progress.emit(total, failed, total, "", True, "")
-            self.finished_ok.emit(self.query)
+            self.progress.emit(gen, total, failed, total, "", True, "")
+            self.finished_ok.emit(gen, self.query)
         except Exception as exc:
-            self.finished_err.emit(f"Erro na pesquisa: {exc}")
+            self.finished_err.emit(gen, f"Erro na pesquisa: {exc}")
 
 
 class AppSearchTab(QWidget):
@@ -194,6 +196,7 @@ class AppSearchTab(QWidget):
         self._hosts_total = 0
         # Após interrupção, ignora sinais tardios do worker antigo
         self._accepting_search_results = False
+        self._search_generation = 0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -418,6 +421,12 @@ class AppSearchTab(QWidget):
             except TypeError:
                 pass
 
+    def _is_current_generation(self, generation: int) -> bool:
+        return (
+            self._accepting_search_results
+            and int(generation) == int(self._search_generation)
+        )
+
     def _abort_worker(self, _destroyed: object = None) -> None:
         w = self._worker
         if w is None:
@@ -427,16 +436,15 @@ class AppSearchTab(QWidget):
         self._disconnect_worker_signals(w)
         w.abort()
         if w.isRunning():
-            # destroyed/close: espera um pouco para a QThread sair do run()
-            # (agora abort é responsivo via wait(timeout) no pool).
-            w.wait(3000)
+            # Aguarda o lote encerrar processos filhos (terminate + join).
+            w.wait(max(3000, int(REMOTE_REGISTRY_TIMEOUT_SECONDS * 1000) // 3))
         if w.isRunning():
             w.finished.connect(w.deleteLater)
         else:
             w.deleteLater()
 
-    def shutdown(self, wait_ms: int = 5000) -> None:
-        """Aborta pesquisa e espera a QThread — chamar antes de fechar/remover a aba."""
+    def shutdown(self, wait_ms: int = 8000) -> None:
+        """Aborta pesquisa, encerra filhos RR e espera a QThread."""
         self._accepting_search_results = False
         w = self._worker
         if w is None:
@@ -453,11 +461,8 @@ class AppSearchTab(QWidget):
 
     def stop_search(self) -> None:
         """
-        Solicita interrupção da pesquisa.
-
-        Futures ainda não iniciados são cancelados; consultas Remote Registry
-        já em andamento podem finalizar em segundo plano. Resultados tardios
-        não são mais aplicados à UI.
+        Interrompe a pesquisa: para o agendamento, encerra processos filhos
+        ativos e descarta resultados posteriores.
         """
         w = self._worker
         if w is None or not w.isRunning():
@@ -470,7 +475,7 @@ class AppSearchTab(QWidget):
             self.log_output.append_log(
                 self.tr(
                     "[PESQUISA] Interrupção solicitada. "
-                    "Consultas já iniciadas podem finalizar em segundo plano."
+                    "Consultas ativas estão sendo encerradas."
                 )
             )
 
@@ -511,6 +516,8 @@ class AppSearchTab(QWidget):
         self._hosts_failed = 0
         self._hosts_done = 0
         self._hosts_total = len(hosts)
+        self._search_generation += 1
+        generation = self._search_generation
         self._accepting_search_results = True
         self.table.setRowCount(0)
         self._apply_results_filter()
@@ -536,6 +543,8 @@ class AppSearchTab(QWidget):
             hosts,
             query,
             max_workers=effective_workers,
+            generation=generation,
+            timeout=REMOTE_REGISTRY_TIMEOUT_SECONDS,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.hitsFound.connect(self._on_hits_found)
@@ -549,7 +558,8 @@ class AppSearchTab(QWidget):
             self.log_output.append_log(
                 self.tr(
                     f"[PESQUISA] Buscando '{query}' em {len(hosts)} host(s) "
-                    f"({effective_workers} consultas simultâneas)..."
+                    f"({effective_workers} consultas simultâneas, "
+                    f"timeout {int(REMOTE_REGISTRY_TIMEOUT_SECONDS)}s/host)..."
                 )
             )
 
@@ -568,29 +578,39 @@ class AppSearchTab(QWidget):
             self.progress_lbl.setText(self.tr(f"0 de {total} consultados"))
 
     def _on_progress(
-        self, done: int, failed: int, total: int, host: str, _ok: bool, error_kind: str = ""
+        self,
+        generation: int,
+        done: int,
+        failed: int,
+        total: int,
+        host: str,
+        _ok: bool,
+        error_kind: str = "",
     ) -> None:
-        if not self._ui_alive() or not self._accepting_search_results:
+        if not self._ui_alive() or int(generation) != int(self._search_generation):
             return
         self._hosts_done = done
         self._hosts_failed = failed
         self._hosts_total = total
         self.progress.setMaximum(max(1, total))
-        self.progress.setValue(done)
+        self.progress.setValue(min(done, total))
         self._update_live_stats(done, failed, total, host)
         if host and not _ok and error_kind and self.log_output:
             kind_labels = {
                 "auth": "falha de autenticação",
-                "remote_registry": "Remote Registry indisponível",
+                "remote_registry": "Remote Registry/RPC indisponível",
                 "unreachable": "host inacessível",
                 "invalid_host": "host inválido",
+                "timed_out": "consulta expirada (timeout)",
                 "cancelled": "consulta cancelada",
+                "internal_error": "erro interno na consulta",
             }
             label = kind_labels.get(error_kind, error_kind)
             self.log_output.append_log(
                 self.tr(f"[PESQUISA] {host}: {label}")
             )
-        self._update_summary(final=False)
+        if self._accepting_search_results:
+            self._update_summary(final=False)
 
     def _on_worker_finished(self) -> None:
         if not self._ui_alive():
@@ -600,9 +620,10 @@ class AppSearchTab(QWidget):
         self.app_edit.setEnabled(True)
         self.browse_hosts_btn.setEnabled(True)
 
-    def _on_search_err(self, msg: str) -> None:
-        if not self._ui_alive():
+    def _on_search_err(self, generation: int, msg: str) -> None:
+        if not self._ui_alive() or int(generation) != int(self._search_generation):
             return
+        self._accepting_search_results = False
         self.progress.setVisible(False)
         self._stats_wrap.setVisible(True)
         self.ok_count_lbl.setVisible(True)
@@ -612,9 +633,9 @@ class AppSearchTab(QWidget):
         if self.log_output:
             self.log_output.append_log(self.tr(f"[PESQUISA] {msg}"))
 
-    def _on_hits_found(self, hits: list) -> None:
+    def _on_hits_found(self, generation: int, hits: list) -> None:
         """Exibe imediatamente as correspondências do host recém-consultado."""
-        if not self._ui_alive() or not self._accepting_search_results or not hits:
+        if not self._ui_alive() or not self._is_current_generation(generation) or not hits:
             return
         for hit in hits:
             if isinstance(hit, SearchHit):
@@ -623,9 +644,10 @@ class AppSearchTab(QWidget):
         self._apply_results_filter()
         self._update_summary(final=False)
 
-    def _on_search_ok(self, query: str) -> None:
-        if not self._ui_alive():
+    def _on_search_ok(self, generation: int, query: str) -> None:
+        if not self._ui_alive() or int(generation) != int(self._search_generation):
             return
+        self._accepting_search_results = False
         self._active_query = query or self._active_query
         self.progress.setValue(self.progress.maximum())
         total = self._hosts_total or self.progress.maximum()
@@ -646,8 +668,8 @@ class AppSearchTab(QWidget):
                 )
             )
 
-    def _on_search_aborted(self, query: str) -> None:
-        if not self._ui_alive():
+    def _on_search_aborted(self, generation: int, query: str) -> None:
+        if not self._ui_alive() or int(generation) != int(self._search_generation):
             return
         self._accepting_search_results = False
         self._active_query = query or self._active_query
@@ -665,9 +687,9 @@ class AppSearchTab(QWidget):
             self.log_output.append_log(
                 self.tr(
                     f"[PESQUISA] Interrompida: {len(computers)} computador(es) com app, "
-                    f"{len(self._hits)} correspondência(s), "
-                    f"{failed} host(s) falharam até o momento. "
-                    "Consultas já iniciadas podem ainda finalizar em segundo plano."
+                    f"{len(self._hits)} correspondência(s) até o momento "
+                    f"({done} de {total} hosts processados, {failed} falha(s)). "
+                    "Consultas ativas foram encerradas."
                 )
             )
 

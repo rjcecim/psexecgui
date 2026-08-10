@@ -42,9 +42,12 @@ from utils.psinfo import (
     parse_psinfo_output,
     format_key_values,
     parse_disks_table,
-    list_remote_installed_apps,
 )
 from utils.app_catalog import resolve_uninstall_extras
+from utils.remote_registry_query import (
+    REMOTE_REGISTRY_TIMEOUT_SECONDS,
+    query_remote_installed_apps,
+)
 
 # Timeout padrão para PsInfo remoto (host offline/problemático não deve travar a UI).
 # Configurável via constante; documentado em documentation.md.
@@ -76,7 +79,8 @@ def _icon_button(icon_char: str, tooltip: str = "", size: int = 32) -> QPushButt
 
 
 class _PsInfoWorker(QThread):
-    finished_ok = pyqtSignal(str, object)  # stdout, apps override (list[InstalledApp] | None)
+    # stdout, apps override (list[InstalledApp] | None), nota do complemento RR
+    finished_ok = pyqtSignal(str, object, str)
     finished_err = pyqtSignal(str)  # erro amigável
 
     def __init__(
@@ -97,6 +101,10 @@ class _PsInfoWorker(QThread):
         self.accepteula = accepteula
         self.nobanner = nobanner
         self.pstools_dir = pstools_dir
+        self._abort = False
+
+    def abort(self) -> None:
+        self._abort = True
 
     def run(self) -> None:
         try:
@@ -156,23 +164,23 @@ class _PsInfoWorker(QThread):
                 self.finished_err.emit(f"Falha ao iniciar PsInfo: {exc}")
                 return
 
+            if self._abort:
+                return
+
             stdout_b = proc.stdout or b""
             stderr_b = proc.stderr or b""
 
             def decode_best_effort(b: bytes) -> str:
                 if not b:
                     return ""
-                # 1) UTF-8 (alguns ambientes / tools usam)
                 try:
                     return b.decode("utf-8-sig")
                 except Exception:
                     pass
-                # 2) Codepage do Windows ("mbcs" / ANSI) — resolve acentuação PT-BR na maioria dos casos
                 try:
                     return b.decode("mbcs", errors="replace")
                 except Exception:
                     pass
-                # 3) Fallback CP1252
                 return b.decode("cp1252", errors="replace")
 
             out = decode_best_effort(stdout_b).strip()
@@ -188,18 +196,40 @@ class _PsInfoWorker(QThread):
                 if not out:
                     return
 
-            # PsInfo64 -s costuma omitir apps 32-bit; complementa via Remote Registry (64+32).
+            # PsInfo64 -s costuma omitir apps 32-bit; complementa via Remote Registry
+            # isolado em processo (timeout/cancelamento reais).
             apps_override = None
-            if self.include_apps:
-                try:
-                    remote_apps = list_remote_installed_apps(self.host)
-                    if remote_apps:
-                        apps_override = remote_apps
-                except Exception:
-                    apps_override = None
+            rr_note = ""
+            if self.include_apps and not self._abort:
+                status = query_remote_installed_apps(
+                    self.host,
+                    timeout=REMOTE_REGISTRY_TIMEOUT_SECONDS,
+                    should_cancel=lambda: self._abort,
+                )
+                if status.ok and status.apps:
+                    apps_override = status.apps
+                elif status.error_kind and status.error_kind != "cancelled":
+                    kind_labels = {
+                        "auth": "falha de autenticação",
+                        "remote_registry": "Remote Registry/RPC indisponível",
+                        "unreachable": "host inacessível",
+                        "invalid_host": "host inválido",
+                        "timed_out": "consulta expirada (timeout)",
+                        "internal_error": "erro interno",
+                    }
+                    label = kind_labels.get(status.error_kind, status.error_kind)
+                    detail = (status.message or "").strip()
+                    rr_note = (
+                        f"Inventário detalhado de aplicativos (Remote Registry) "
+                        f"não complementar: {label}"
+                        + (f" — {detail}" if detail else "")
+                        + ". Exibindo dados disponíveis do PsInfo."
+                    )
 
-            # Mesmo com returncode != 0, o PsInfo às vezes escreve dados úteis em stdout.
-            self.finished_ok.emit(out if out else err, apps_override)
+            if self._abort:
+                return
+
+            self.finished_ok.emit(out if out else err, apps_override, rr_note)
         except FileNotFoundError:
             self.finished_err.emit(
                 "Não foi possível encontrar o PsInfo na pasta PSTools configurada."
@@ -330,17 +360,17 @@ class PsInfoTab(QWidget):
             w.finished.disconnect(self._on_worker_thread_finished)
         except TypeError:
             pass
+        w.abort()
         if w.isRunning():
-            # PsInfo pode estar em subprocess.run (até PSINFO_TIMEOUT_SECONDS);
-            # evita destruir a QThread no meio do voo.
-            w.wait(3000)
+            # PsInfo subprocess + possível filho RR; espera limitada.
+            w.wait(max(3000, int(REMOTE_REGISTRY_TIMEOUT_SECONDS * 1000)))
         if w.isRunning():
             w.finished.connect(w.deleteLater)
         else:
             w.deleteLater()
 
-    def shutdown(self, wait_ms: int = 5000) -> None:
-        """Espera o worker do PsInfo — chamar antes de fechar/remover a aba."""
+    def shutdown(self, wait_ms: int = 8000) -> None:
+        """Aborta worker/PsInfo/RR e espera a QThread — antes de fechar/remover a aba."""
         w = self._worker
         if w is None:
             return
@@ -357,6 +387,7 @@ class PsInfoTab(QWidget):
             w.finished.disconnect(self._on_worker_thread_finished)
         except TypeError:
             pass
+        w.abort()
         if w.isRunning():
             w.wait(max(0, int(wait_ms)))
         if w.isRunning():
@@ -858,7 +889,7 @@ class PsInfoTab(QWidget):
         self._status_lbl.setText(self.tr("Falha na coleta"))
         self._add_text_card("\uE783", self.tr("Erro"), msg)
 
-    def _on_psinfo_ok(self, stdout: str, apps_override=None) -> None:
+    def _on_psinfo_ok(self, stdout: str, apps_override=None, rr_note: str = "") -> None:
         if not self._ui_alive():
             return
         self._set_loading(False)
@@ -895,11 +926,19 @@ class PsInfoTab(QWidget):
         elif parsed.applications:
             self._add_apps_card("\uE71D", self.tr("Aplicativos"), parsed.applications)
 
+        note = (rr_note or "").strip()
+        if note and self.log_output:
+            self.log_output.append_log(self.tr(f"[PSINFO] {note}"))
+
         # Card Discos
         if parsed.disks_raw:
             self._add_disks_card("\uE7B8", self.tr("Discos"), parsed.disks_raw)
 
         if self.log_output:
             self.log_output.append_log(self.tr(f"[PSINFO] Coleta finalizada para {host}."))
-        self._status_lbl.setText(self.tr(f"Inventário de {host}") if host else self.tr("Inventário atualizado"))
-
+        if note:
+            self._status_lbl.setText(self.tr(note))
+        else:
+            self._status_lbl.setText(
+                self.tr(f"Inventário de {host}") if host else self.tr("Inventário atualizado")
+            )
