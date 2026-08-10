@@ -12,7 +12,9 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -25,13 +27,23 @@ from utils.app_logging import (
     is_file_logging_enabled,
     set_file_logging_enabled,
 )
-from utils.hosts import default_hosts_path, resolve_hosts_path
+from utils.app_settings import SETTINGS_SAVE_ERROR_MSG, SettingsWriteError
+from utils.hosts import default_hosts_path
 from utils.pstools import (
     DEFAULT_PSTOOLS_DIR,
     get_pstools_dir,
     probe_pstools,
     probe_rustdesk_local,
     set_pstools_dir,
+)
+from utils.search_settings import (
+    DEFAULT_SEARCH_MAX_WORKERS,
+    MAX_SEARCH_MAX_WORKERS,
+    MIN_SEARCH_MAX_WORKERS,
+    get_search_max_workers,
+    resolve_configured_hosts_path,
+    set_search_hosts_path,
+    set_search_max_workers,
 )
 
 _STATUS_COLORS = {
@@ -240,10 +252,10 @@ class SettingsTab(QWidget):
         card_logs.set_collapsible(True, collapsed=False)
         g2 = grid_in_card(card_logs)
 
-        self.log_session_check = QCheckBox(self.tr("Salvar log em arquivo nesta sessão"))
+        self.log_session_check = QCheckBox(self.tr("Salvar log em arquivo"))
         self.log_session_check.setChecked(is_file_logging_enabled())
         self.log_session_check.setToolTip(
-            self.tr("Marque para gravar as operações em arquivo nesta sessão.")
+            self.tr("Marque para gravar as operações em arquivo (preferência salva no settings.ini).")
         )
         self.log_session_check.toggled.connect(self._on_log_session_toggled)
         add_row_full_width(g2, 0, self.log_session_check)
@@ -274,41 +286,78 @@ class SettingsTab(QWidget):
         )
         root.addWidget(card_logs)
 
-        # ── Card 4 — Hosts ────────────────────────────────────────────────────
-        card_hosts = CardWidget("\uE968", self.tr("Hosts"))
-        card_hosts.set_collapsible(True, collapsed=False)
-        g3 = grid_in_card(card_hosts)
+        # ── Card 4 — Pesquisa de aplicativos ──────────────────────────────────
+        # \uE721 = Find / Search (mesmo ícone da pesquisa)
+        card_search = CardWidget("\uE721", self.tr("Pesquisa de aplicativos"))
+        card_search.set_collapsible(True, collapsed=False)
+        g3 = grid_in_card(card_search)
 
         hosts_row = QHBoxLayout()
         hosts_row.setSpacing(4)
         hosts_row.setContentsMargins(0, 0, 0, 0)
         self.hosts_edit = QLineEdit()
         self.hosts_edit.setReadOnly(True)
-        path, origin = resolve_hosts_path()
-        self.hosts_edit.setText(path or default_hosts_path())
+        self.hosts_edit.setToolTip(self.tr("Arquivo JSON com a lista de computadores"))
         self.hosts_status = QLabel()
         self.hosts_status.setObjectName("hostsStatus")
         self.hosts_status.setStyleSheet(
             f"QLabel#hostsStatus {{ color: palette(mid); font-size: {SIZE_UI_SMALL}pt; }}"
         )
-        self._set_hosts_status(origin, path)
+        self.hosts_browse_btn = make_icon_button("\uED25", self.tr("Selecionar outro hosts.json"))
+        self.hosts_browse_btn.clicked.connect(self._browse_hosts_file)
         self.hosts_open_btn = make_icon_button("\uED43", self.tr("Abrir pasta do hosts.json"))
         self.hosts_open_btn.clicked.connect(lambda: _open_in_explorer(self.hosts_edit.text()))
+        self.hosts_reset_btn = make_icon_button(
+            "\uE777", self.tr("Restaurar hosts.json padrão do aplicativo")
+        )
+        self.hosts_reset_btn.clicked.connect(self._reset_hosts_file)
         hosts_row.addWidget(self.hosts_edit, 1)
+        hosts_row.addWidget(self.hosts_browse_btn)
         hosts_row.addWidget(self.hosts_open_btn)
+        hosts_row.addWidget(self.hosts_reset_btn)
         hosts_wrap = QWidget()
         hosts_wrap.setLayout(hosts_row)
         add_row(g3, 0, self.tr("hosts.json"), hosts_wrap)
         add_row(g3, 1, self.tr("Status"), self.hosts_status)
+        self._refresh_hosts_ui()
+
+        workers_row = QHBoxLayout()
+        workers_row.setSpacing(4)
+        workers_row.setContentsMargins(0, 0, 0, 0)
+        self.search_workers_spin = QSpinBox()
+        self.search_workers_spin.setRange(MIN_SEARCH_MAX_WORKERS, MAX_SEARCH_MAX_WORKERS)
+        self.search_workers_spin.setSingleStep(1)
+        self.search_workers_spin.setToolTip(
+            self.tr(
+                "Quantidade máxima de computadores consultados ao mesmo tempo "
+                f"(padrão {DEFAULT_SEARCH_MAX_WORKERS})."
+            )
+        )
+        self.search_workers_spin.blockSignals(True)
+        self.search_workers_spin.setValue(get_search_max_workers())
+        self.search_workers_spin.blockSignals(False)
+        self.search_workers_spin.valueChanged.connect(self._on_search_workers_changed)
+        self.search_workers_reset_btn = make_icon_button(
+            "\uE777",
+            self.tr(f"Restaurar padrão ({DEFAULT_SEARCH_MAX_WORKERS})"),
+        )
+        self.search_workers_reset_btn.clicked.connect(self._reset_search_workers)
+        workers_row.addWidget(self.search_workers_spin)
+        workers_row.addWidget(self.search_workers_reset_btn)
+        workers_row.addStretch()
+        workers_wrap = QWidget()
+        workers_wrap.setLayout(workers_row)
+        add_row(g3, 2, self.tr("Consultas simultâneas"), workers_wrap)
         _add_caption(
             g3,
-            2,
+            3,
             self.tr(
-                "Lista de computadores da Pesquisa de Aplicativos. "
-                "Se não existir, escolha o arquivo na própria pesquisa."
+                "Define quantos computadores podem ser consultados ao mesmo tempo. "
+                "Valores maiores podem acelerar a pesquisa, mas aumentam o número de "
+                "conexões simultâneas. A alteração será aplicada na próxima pesquisa."
             ),
         )
-        root.addWidget(card_hosts)
+        root.addWidget(card_search)
 
         # ── Card 5 — Sobre ────────────────────────────────────────────────────
         card_about = CardWidget("\uE946", self.tr("Sobre"))
@@ -334,9 +383,67 @@ class SettingsTab(QWidget):
             self.logs_edit.setText(get_log_dir(create=False))
         except Exception:
             pass
-        path, origin = resolve_hosts_path()
+        self._refresh_hosts_ui()
+        self.search_workers_spin.blockSignals(True)
+        self.search_workers_spin.setValue(get_search_max_workers())
+        self.search_workers_spin.blockSignals(False)
+
+    def _refresh_hosts_ui(self) -> None:
+        path, origin = resolve_configured_hosts_path()
         self.hosts_edit.setText(path or default_hosts_path())
         self._set_hosts_status(origin, path)
+
+    def _show_settings_save_error(self, exc: BaseException | None = None) -> None:
+        msg = SETTINGS_SAVE_ERROR_MSG
+        if isinstance(exc, SettingsWriteError) and getattr(exc, "message", None):
+            msg = exc.message
+        QMessageBox.warning(self, self.tr("Configurações"), self.tr(msg))
+
+    def _browse_hosts_file(self) -> None:
+        start = self.hosts_edit.text().strip() or default_hosts_path()
+        if start and not os.path.isdir(os.path.dirname(start)):
+            start = default_hosts_path()
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            self.tr("Selecionar arquivo de hosts"),
+            start,
+            self.tr("JSON (*.json)"),
+        )
+        if not path:
+            return
+        try:
+            set_search_hosts_path(path)
+        except SettingsWriteError as exc:
+            self._show_settings_save_error(exc)
+            return
+        self._refresh_hosts_ui()
+
+    def _reset_hosts_file(self) -> None:
+        try:
+            set_search_hosts_path("")
+        except SettingsWriteError as exc:
+            self._show_settings_save_error(exc)
+            return
+        self._refresh_hosts_ui()
+
+    def _on_search_workers_changed(self, value: int) -> None:
+        try:
+            set_search_max_workers(value)
+        except SettingsWriteError as exc:
+            self._show_settings_save_error(exc)
+            self.search_workers_spin.blockSignals(True)
+            self.search_workers_spin.setValue(get_search_max_workers())
+            self.search_workers_spin.blockSignals(False)
+
+    def _reset_search_workers(self) -> None:
+        try:
+            normalized = set_search_max_workers(DEFAULT_SEARCH_MAX_WORKERS)
+        except SettingsWriteError as exc:
+            self._show_settings_save_error(exc)
+            return
+        self.search_workers_spin.blockSignals(True)
+        self.search_workers_spin.setValue(normalized)
+        self.search_workers_spin.blockSignals(False)
 
     def _set_hosts_status(self, origin: str, path: Optional[str]) -> None:
         if origin == "missing" or not path or not os.path.isfile(path):
@@ -353,19 +460,34 @@ class SettingsTab(QWidget):
         )
         if not folder:
             return
-        new_path = set_pstools_dir(folder)
+        try:
+            new_path = set_pstools_dir(folder)
+        except SettingsWriteError as exc:
+            self._show_settings_save_error(exc)
+            return
         self.pstools_edit.setText(new_path)
         self.refresh_pstools_status()
         self.pstoolsPathChanged.emit(new_path)
 
     def _reset_pstools(self) -> None:
-        new_path = set_pstools_dir(DEFAULT_PSTOOLS_DIR)
+        try:
+            new_path = set_pstools_dir(DEFAULT_PSTOOLS_DIR)
+        except SettingsWriteError as exc:
+            self._show_settings_save_error(exc)
+            return
         self.pstools_edit.setText(new_path)
         self.refresh_pstools_status()
         self.pstoolsPathChanged.emit(new_path)
 
     def _on_log_session_toggled(self, checked: bool) -> None:
-        set_file_logging_enabled(checked)
+        try:
+            set_file_logging_enabled(checked)
+        except SettingsWriteError as exc:
+            self._show_settings_save_error(exc)
+            self.log_session_check.blockSignals(True)
+            self.log_session_check.setChecked(is_file_logging_enabled())
+            self.log_session_check.blockSignals(False)
+            return
         # Atualiza caminho (cria pasta só se acabou de habilitar)
         try:
             self.logs_edit.setText(get_log_dir(create=checked))

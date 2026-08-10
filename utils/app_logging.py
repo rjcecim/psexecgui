@@ -5,88 +5,98 @@ from __future__ import annotations
 import datetime
 import logging
 import os
-import sys
 from typing import Iterable, Optional
 
 from utils.redaction import redact_command_text
 
 _LOGGER_NAME = "psexecgui"
 _configured = False
-# Sessão: desligado por padrão — só grava em arquivo se o usuário marcar em Configurações
+# Desligado por padrão; preferência pode ser persistida em settings.ini
 _file_logging_enabled = False
+_file_logging_loaded = False
 
-# Arquivo de histórico de operações — única fonte de escrita: _append_history_line
-HISTORY_FILENAME = "exec_history.log"
-# Log estruturado do logger (separado do histórico de operações)
-APP_LOG_FILENAME = "app.log"
-
-
-def is_portable_mode() -> bool:
-    """
-    Modo portable: arquivo ``portable.flag`` ao lado do exe/script,
-    ou variável de ambiente PSEXECGUI_PORTABLE=1.
-    """
-    if os.environ.get("PSEXECGUI_PORTABLE", "").strip() in ("1", "true", "True", "yes"):
-        return True
-    base = _app_dir()
-    return os.path.isfile(os.path.join(base, "portable.flag"))
+# Único arquivo de log em disco (pasta logs/ ao lado do app)
+LOG_FILENAME = "app.log"
 
 
-def _app_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def _parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in ("1", "true", "yes", "on")
 
 
 def get_log_dir(*, create: bool = True) -> str:
     """
-    Diretório de logs:
-    - portable / env: pasta do app
-    - caso contrário: %LOCALAPPDATA%\\PSExecGUI\\logs
+    Diretório de logs portátil: ``<pasta do app>/logs``.
+    Em desenvolvimento: raiz do repositório; no exe: pasta do PSExecGUI.exe.
     """
-    if is_portable_mode():
-        path = os.path.join(_app_dir(), "logs")
-    else:
-        local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        path = os.path.join(local, "PSExecGUI", "logs")
+    from utils.app_settings import get_app_dir
+
+    path = str(get_app_dir() / "logs")
     if create:
         os.makedirs(path, exist_ok=True)
     return path
 
 
-def get_history_log_path() -> str:
-    return os.path.join(get_log_dir(), HISTORY_FILENAME)
+def get_log_file_path() -> str:
+    return os.path.join(get_log_dir(), LOG_FILENAME)
 
 
+# Compat com código/UI antigos
 def get_app_log_path() -> str:
-    return os.path.join(get_log_dir(), APP_LOG_FILENAME)
+    return get_log_file_path()
+
+
+def get_history_log_path() -> str:
+    return get_log_file_path()
 
 
 def is_file_logging_enabled() -> bool:
-    """Se True, grava app.log / exec_history.log nesta sessão."""
+    """Se True, grava app.log (preferência em settings.ini)."""
+    global _file_logging_enabled, _file_logging_loaded
+    if not _file_logging_loaded:
+        try:
+            from utils.app_settings import KEY_LOGS_FILE_ENABLED, load_setting
+
+            _file_logging_enabled = _parse_bool(
+                load_setting(KEY_LOGS_FILE_ENABLED, False)
+            )
+        except Exception:
+            _file_logging_enabled = False
+        _file_logging_loaded = True
     return _file_logging_enabled
 
 
-def set_file_logging_enabled(enabled: bool) -> None:
-    """Liga/desliga gravação em arquivo para a sessão atual (não persiste)."""
-    global _file_logging_enabled
+def set_file_logging_enabled(enabled: bool, *, persist: bool = True) -> bool:
+    """
+    Liga/desliga gravação em arquivo e persiste em settings.ini.
+    Em falha de gravação, mantém o valor anterior e propaga SettingsWriteError.
+    """
+    global _file_logging_enabled, _file_logging_loaded
+    current = is_file_logging_enabled()
     enabled = bool(enabled)
-    if enabled == _file_logging_enabled:
-        return
+    if persist:
+        from utils.app_settings import KEY_LOGS_FILE_ENABLED, save_portable_settings
+
+        save_portable_settings({KEY_LOGS_FILE_ENABLED: enabled})
     _file_logging_enabled = enabled
+    _file_logging_loaded = True
     if enabled:
         _ensure_file_handler()
-    else:
+    elif current or _configured:
         _remove_file_handlers()
+    return enabled
 
 
 def configure_logging(level: int = logging.INFO) -> logging.Logger:
     """
     Configura o logger da aplicação.
 
-    Por padrão **não** cria FileHandler (log em arquivo desligado).
-    O histórico de operações (``exec_history.log``) é escrito **somente** por
-    ``_append_history_line`` / ``log_operation`` quando o log em arquivo está ativo.
+    FileHandler só é criado se a preferência de log em arquivo estiver ativa.
+    Tudo vai para um único ``logs/app.log`` na pasta do aplicativo.
     """
     global _configured
     logger = logging.getLogger(_LOGGER_NAME)
@@ -94,11 +104,10 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
         return logger
     logger.setLevel(level)
     logger.propagate = False
-    # Sem handler de arquivo até o usuário habilitar na sessão
     if not logger.handlers:
         logger.addHandler(logging.NullHandler())
     _configured = True
-    if _file_logging_enabled:
+    if is_file_logging_enabled():
         _ensure_file_handler()
     return logger
 
@@ -119,7 +128,7 @@ def _ensure_file_handler() -> None:
             "[%(asctime)s] %(levelname)s %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-        fh = logging.FileHandler(get_app_log_path(), encoding="utf-8")
+        fh = logging.FileHandler(get_log_file_path(), encoding="utf-8")
         fh.setFormatter(fmt)
         fh.setLevel(logger.level)
         logger.addHandler(fh)
@@ -138,12 +147,12 @@ def _remove_file_handlers() -> None:
                 pass
 
 
-def _append_history_line(text: str) -> None:
-    """Única função que escreve em exec_history.log."""
+def _append_log_line(text: str) -> None:
+    """Única escrita direta em logs/app.log (além do FileHandler do logger)."""
     if not _file_logging_enabled:
         return
     try:
-        path = get_history_log_path()
+        path = get_log_file_path()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(path, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {text}\n")
@@ -160,10 +169,9 @@ def log_operation(
     level: int = logging.INFO,
 ) -> str:
     """
-    Registra uma operação já sanitizada (única entrada no histórico).
+    Registra uma operação já sanitizada.
 
-    Escreve em ``exec_history.log`` e ``app.log`` somente se o log em arquivo
-    estiver habilitado nesta sessão.
+    Escreve uma única vez em ``logs/app.log`` quando o log em arquivo está ativo.
     """
     safe_detail = redact_command_text(detail or "", passwords=passwords)
     parts = [operation]
@@ -173,8 +181,8 @@ def log_operation(
         parts.append(f"exit_code={exit_code}")
     message = " | ".join(parts)
     if _file_logging_enabled:
-        get_logger().log(level, message)
-        _append_history_line(message)
+        # Uma única gravação (evita duplicar via FileHandler + append)
+        _append_log_line(message)
     return message
 
 
@@ -182,21 +190,16 @@ def append_history(
     text: str,
     passwords: Optional[Iterable[str]] = None,
 ) -> None:
-    """
-    API pública para histórico livre (UI).
-
-    Preferir ``log_operation`` para operações tipadas. Não chamar ambos para
-    a mesma operação.
-    """
+    """API pública para histórico livre (UI). Preferir ``log_operation`` quando tipado."""
     if not _file_logging_enabled:
         return
     safe = redact_command_text(text or "", passwords=passwords)
-    _append_history_line(safe)
+    _append_log_line(safe)
 
 
 def reset_logging_for_tests() -> None:
     """Reinicia estado do logger (apenas testes)."""
-    global _configured, _file_logging_enabled
+    global _configured, _file_logging_enabled, _file_logging_loaded
     logger = logging.getLogger(_LOGGER_NAME)
     for h in list(logger.handlers):
         logger.removeHandler(h)
@@ -206,3 +209,4 @@ def reset_logging_for_tests() -> None:
             pass
     _configured = False
     _file_logging_enabled = False
+    _file_logging_loaded = False

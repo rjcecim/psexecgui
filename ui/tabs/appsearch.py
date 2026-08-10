@@ -38,9 +38,14 @@ from utils.psinfo import (
 )
 from utils.app_catalog import resolve_uninstall_extras
 from utils.hosts import load_hosts_file, default_hosts_path, app_dir as _hosts_app_dir
-
-# Consultas remotas são I/O-bound; paralelizar acelera a varredura multi-host.
-_SEARCH_MAX_WORKERS = 8
+from utils.app_settings import SETTINGS_SAVE_ERROR_MSG, SettingsWriteError
+from utils.search_settings import (
+    MAX_SEARCH_MAX_WORKERS,
+    MIN_SEARCH_MAX_WORKERS,
+    get_search_max_workers,
+    resolve_configured_hosts_path,
+    set_search_hosts_path,
+)
 
 
 def _app_dir() -> str:
@@ -87,11 +92,15 @@ class _AppSearchWorker(QThread):
     finished_aborted = pyqtSignal(str)  # query (interrupção pelo usuário)
     finished_err = pyqtSignal(str)
 
-    def __init__(self, hosts: List[str], query: str, max_workers: int = _SEARCH_MAX_WORKERS):
+    def __init__(self, hosts: List[str], query: str, max_workers: int = 8):
         super().__init__()
         self.hosts = list(hosts)
         self.query = (query or "").strip()
-        self.max_workers = max(1, int(max_workers))
+        try:
+            n = int(max_workers)
+        except (TypeError, ValueError):
+            n = 8
+        self.max_workers = max(MIN_SEARCH_MAX_WORKERS, min(MAX_SEARCH_MAX_WORKERS, n))
         self._abort = False
 
     def abort(self) -> None:
@@ -350,9 +359,9 @@ class AppSearchTab(QWidget):
         return not sip.isdeleted(self)
 
     def _init_hosts_file(self) -> None:
-        default = default_hosts_path()
-        if os.path.isfile(default):
-            self._set_hosts_path(default)
+        path, _origin = resolve_configured_hosts_path()
+        if path and os.path.isfile(path):
+            self._set_hosts_path(path, persist=False)
         else:
             self.hosts_path_edit.clear()
             self.hosts_path_edit.setPlaceholderText(
@@ -362,11 +371,18 @@ class AppSearchTab(QWidget):
                 )
             )
 
-    def _set_hosts_path(self, path: str) -> None:
+    def _set_hosts_path(self, path: str, *, persist: bool = True) -> None:
         p = os.path.normpath(path)
         # Windows pode devolver "c:\..."; exibir "C:\" em caixa alta
         if len(p) >= 2 and p[1] == ":":
             p = p[0].upper() + p[1:]
+        if persist:
+            try:
+                set_search_hosts_path(p)
+            except SettingsWriteError as exc:
+                msg = getattr(exc, "message", None) or SETTINGS_SAVE_ERROR_MSG
+                QMessageBox.warning(self, self.tr("Configurações"), self.tr(msg))
+                return
         self._hosts_path = p
         self.hosts_path_edit.setText(self._hosts_path)
 
@@ -483,7 +499,13 @@ class AppSearchTab(QWidget):
         self._update_live_stats(0, 0, len(hosts), "")
         self.progress_lbl.setText(self.tr("Iniciando pesquisa..."))
 
-        self._worker = _AppSearchWorker(hosts, query)
+        configured_workers = get_search_max_workers()
+        effective_workers = min(configured_workers, len(hosts))
+        self._worker = _AppSearchWorker(
+            hosts,
+            query,
+            max_workers=effective_workers,
+        )
         self._worker.progress.connect(self._on_progress)
         self._worker.hitsFound.connect(self._on_hits_found)
         self._worker.finished_ok.connect(self._on_search_ok)
@@ -492,12 +514,11 @@ class AppSearchTab(QWidget):
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
-        workers = min(_SEARCH_MAX_WORKERS, len(hosts))
         if self.log_output:
             self.log_output.append_log(
                 self.tr(
                     f"[PESQUISA] Buscando '{query}' em {len(hosts)} host(s) "
-                    f"({workers} threads)..."
+                    f"({effective_workers} consultas simultâneas)..."
                 )
             )
 

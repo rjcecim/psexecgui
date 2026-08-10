@@ -3,14 +3,12 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from utils.app_settings import KEY_PSTOOLS_DIR, load_setting, save_portable_settings
+
 # Pasta padrão das PSTools (PsExec, PsInfo, etc.)
 DEFAULT_PSTOOLS_DIR = r"C:\PSTools"
 # Compat: nome histórico aponta para o padrão
 PSTOOLS_DIR = DEFAULT_PSTOOLS_DIR
-
-_SETTINGS_ORG = "PSExecGUI"
-_SETTINGS_APP = "PSExecGUI"
-_SETTINGS_KEY = "pstools/dir"
 
 _runtime_dir: Optional[str] = None
 
@@ -30,27 +28,13 @@ def normalize_pstools_dir(path: str) -> str:
 
 
 def _load_from_settings() -> str:
-    try:
-        from PyQt6.QtCore import QSettings
-
-        raw = QSettings(_SETTINGS_ORG, _SETTINGS_APP).value(_SETTINGS_KEY, "")
-        normalized = normalize_pstools_dir(str(raw or ""))
-        return normalized or DEFAULT_PSTOOLS_DIR
-    except Exception:
-        return DEFAULT_PSTOOLS_DIR
-
-
-def _save_to_settings(path: str) -> None:
-    try:
-        from PyQt6.QtCore import QSettings
-
-        QSettings(_SETTINGS_ORG, _SETTINGS_APP).setValue(_SETTINGS_KEY, path)
-    except Exception:
-        pass
+    raw = load_setting(KEY_PSTOOLS_DIR, "")
+    normalized = normalize_pstools_dir(str(raw or ""))
+    return normalized or DEFAULT_PSTOOLS_DIR
 
 
 def get_pstools_dir() -> str:
-    """Pasta PSTools em uso (persistida; padrão C:\\PSTools)."""
+    """Pasta PSTools em uso (persistida em settings.ini; padrão C:\\PSTools)."""
     global _runtime_dir
     if _runtime_dir is None:
         _runtime_dir = _load_from_settings()
@@ -58,12 +42,15 @@ def get_pstools_dir() -> str:
 
 
 def set_pstools_dir(path: str, *, persist: bool = True) -> str:
-    """Define a pasta PSTools em runtime (e opcionalmente persiste)."""
+    """
+    Define a pasta PSTools em runtime e, se persist=True, grava o snapshot
+    completo em settings.ini. Em falha, mantém o valor anterior.
+    """
     global _runtime_dir
     normalized = normalize_pstools_dir(path) or DEFAULT_PSTOOLS_DIR
-    _runtime_dir = normalized
     if persist:
-        _save_to_settings(normalized)
+        save_portable_settings({KEY_PSTOOLS_DIR: normalized})
+    _runtime_dir = normalized
     return normalized
 
 

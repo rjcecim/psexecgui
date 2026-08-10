@@ -39,6 +39,9 @@ exec_history.log
 # Configuração local de hosts (use hosts.example.json como modelo)
 hosts.json
 
+# Preferências portáteis do aplicativo (não versionar)
+settings.ini
+
 # Modo portable
 portable.flag
 
