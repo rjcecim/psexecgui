@@ -2,10 +2,11 @@ import sys
 import os
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QTabWidget,
-    QHBoxLayout, QCheckBox, QLabel, QTabBar, QStyle, QStyleOptionTab, QSizePolicy
+    QHBoxLayout, QCheckBox, QLabel, QTabBar, QStyle, QStyleOptionTab,
+    QSizePolicy,
 )
 from PyQt6.QtCore import QCoreApplication, Qt, QRect, QSize
-from PyQt6.QtGui import QFont, QFontMetrics, QPainter, QColor, QPalette
+from PyQt6.QtGui import QCursor, QFont, QFontMetrics, QPainter, QColor, QPalette
 from ui.widgets.selector import FileSelectorWidget
 from ui.tabs.psexec import PsExecTab
 from ui.tabs.msi import MsiTab
@@ -35,27 +36,52 @@ from ui.style import ICON_FONT_PT, make_icon_button
 
 
 class _Mdl2TabBar(QTabBar):
-    """TabBar que desenha ícone (char Unicode) + texto; ícone em tabData(UserRole)."""
+    """TabBar que desenha ícone + texto; X de fechar fica colado ao título."""
 
-    # Margens horizontais do paintEvent (esquerda / gap ícone-texto / direita)
+    # Margens: esquerda / gap ícone-texto / gap título-X / direita
     _PAD_LEFT = 8
     _PAD_GAP = 4
+    _CLOSE_GAP = 2
     _PAD_RIGHT = 8
+    _CLOSE_CHAR = "\uE711"  # mesmo X das entradas com limpar
+    _CLOSE_FONT_PT = 9
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._icon_font = QFont("Segoe MDL2 Assets", ICON_FONT_PT)
-        # Largura por conteúdo; não comprimir títulos — usa rolagem se faltar espaço
+        self._close_font = QFont("Segoe MDL2 Assets", self._CLOSE_FONT_PT)
+        self._close_rects: dict[int, QRect] = {}
+        self._pressed_close: int | None = None
         self.setExpanding(False)
         self.setElideMode(Qt.TextElideMode.ElideNone)
         self.setUsesScrollButtons(True)
         self.setMovable(False)
+        self.setMouseTracking(True)
+
+    def _tab_icon(self, index: int) -> str:
+        data = self.tabData(index)
+        if isinstance(data, dict):
+            return str(data.get("icon") or "")
+        return data if isinstance(data, str) else ""
+
+    def _tab_closable(self, index: int) -> bool:
+        data = self.tabData(index)
+        return isinstance(data, dict) and bool(data.get("closable"))
+
+    def set_tab_meta(self, index: int, icon: str, *, closable: bool = False) -> None:
+        """Define ícone e se a aba tem X ao lado do título."""
+        if closable:
+            self.setTabData(index, {"icon": icon or "", "closable": True})
+        else:
+            self.setTabData(index, icon or "")
+
+    def _close_glyph_width(self) -> int:
+        return QFontMetrics(self._close_font).horizontalAdvance(self._CLOSE_CHAR)
 
     def _tab_content_width(self, index: int) -> int:
-        icon = self.tabData(index) or ""
+        icon = self._tab_icon(index)
         text = self.tabText(index) or ""
 
-        # Reservar espaço para negrito (aba selecionada) para o título não cortar
         text_font = QFont(self.font())
         text_font_bold = QFont(text_font)
         text_font_bold.setBold(True)
@@ -64,13 +90,19 @@ class _Mdl2TabBar(QTabBar):
             QFontMetrics(text_font_bold).horizontalAdvance(text),
         )
 
-        icon_w = 0
-        if icon and isinstance(icon, str):
-            icon_w = QFontMetrics(self._icon_font).horizontalAdvance(icon)
+        icon_w = QFontMetrics(self._icon_font).horizontalAdvance(icon) if icon else 0
+        close_w = 0
+        if self._tab_closable(index):
+            close_w = self._CLOSE_GAP + self._close_glyph_width()
 
-        # Mesmo layout do paintEvent: pad + ícone + gap + texto + pad
-        width = self._PAD_LEFT + icon_w + (self._PAD_GAP if icon_w else 0) + text_w + self._PAD_RIGHT
-        # Folga para borda/estilo da tab (evita corte em DPI/temas)
+        width = (
+            self._PAD_LEFT
+            + icon_w
+            + (self._PAD_GAP if icon_w else 0)
+            + text_w
+            + close_w
+            + self._PAD_RIGHT
+        )
         width += self.style().pixelMetric(
             QStyle.PixelMetric.PM_TabBarTabHSpace, None, self
         )
@@ -80,8 +112,46 @@ class _Mdl2TabBar(QTabBar):
         return QSize(self._tab_content_width(index), super().tabSizeHint(index).height())
 
     def minimumTabSizeHint(self, index):
-        # Impede o Qt de encolher a aba e cortar "PowerShell" / "Robocopy" etc.
         return self.tabSizeHint(index)
+
+    def _close_hit_index(self, pos) -> int | None:
+        point = pos.toPoint() if hasattr(pos, "toPoint") else pos
+        for i, rect in self._close_rects.items():
+            if rect.contains(point):
+                return i
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            hit = self._close_hit_index(event.position())
+            if hit is not None:
+                self._pressed_close = hit
+                return
+        self._pressed_close = None
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._pressed_close is not None:
+            hit = self._close_hit_index(event.position())
+            idx = self._pressed_close
+            self._pressed_close = None
+            if hit == idx:
+                self.tabCloseRequested.emit(idx)
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event):
+        hit = self._close_hit_index(event.position())
+        self.setCursor(
+            QCursor(Qt.CursorShape.PointingHandCursor)
+            if hit is not None
+            else QCursor(Qt.CursorShape.ArrowCursor)
+        )
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        super().leaveEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -89,41 +159,62 @@ class _Mdl2TabBar(QTabBar):
         tab_font = self.font()
         tab_font_bold = QFont(tab_font)
         tab_font_bold.setBold(True)
+        highlight = self.palette().color(QPalette.ColorRole.Highlight)
+        text_color = self.palette().color(QPalette.ColorRole.WindowText)
+        self._close_rects = {}
+
         for i in range(self.count()):
             opt = QStyleOptionTab()
             self.initStyleOption(opt, i)
             rect = self.tabRect(i)
-            icon_char = self.tabData(i)
-            text = self.tabText(i)
-            opt.text = ""  # nós desenhamos ícone + texto abaixo
+            icon_char = self._tab_icon(i)
+            text = self.tabText(i) or ""
+            closable = self._tab_closable(i)
+            opt.text = ""
             self.style().drawControl(QStyle.ControlElement.CE_TabBarTab, opt, painter, self)
-            highlight = self.palette().color(QPalette.ColorRole.Highlight)
+
             is_selected = i == current
             text_font = tab_font_bold if is_selected else tab_font
-            if icon_char and isinstance(icon_char, str):
+            x = rect.left() + self._PAD_LEFT
+            mid_y = rect.center().y()
+
+            if icon_char:
                 painter.setFont(self._icon_font)
                 painter.setPen(highlight)
                 icon_w = painter.fontMetrics().horizontalAdvance(icon_char)
+                icon_h = painter.fontMetrics().height()
                 painter.drawText(
-                    rect.adjusted(self._PAD_LEFT, 0, -self._PAD_RIGHT, 0),
+                    QRect(x, mid_y - icon_h // 2, icon_w, icon_h),
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                     icon_char,
                 )
-                painter.setFont(text_font)
-                painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
+                x += icon_w + self._PAD_GAP
+
+            painter.setFont(text_font)
+            painter.setPen(text_color)
+            text_w = painter.fontMetrics().horizontalAdvance(text)
+            text_h = painter.fontMetrics().height()
+            painter.drawText(
+                QRect(x, mid_y - text_h // 2, text_w, text_h),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                text,
+            )
+            x += text_w
+
+            if closable:
+                x += self._CLOSE_GAP
+                painter.setFont(self._close_font)
+                painter.setPen(highlight)
+                close_w = painter.fontMetrics().horizontalAdvance(self._CLOSE_CHAR)
+                close_h = painter.fontMetrics().height()
+                close_rect = QRect(x, mid_y - close_h // 2, close_w, close_h)
                 painter.drawText(
-                    rect.adjusted(self._PAD_LEFT + icon_w + self._PAD_GAP, 0, -self._PAD_RIGHT, 0),
+                    close_rect,
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    text,
+                    self._CLOSE_CHAR,
                 )
-            else:
-                painter.setFont(text_font)
-                painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
-                painter.drawText(
-                    rect.adjusted(self._PAD_LEFT, 0, -self._PAD_RIGHT, 0),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    text,
-                )
+                # Área de clique um pouco maior que o glifo
+                self._close_rects[i] = close_rect.adjusted(-2, -2, 4, 2)
 
 
 # Tradução futura: strings em português
@@ -155,6 +246,7 @@ class MainWindow(QMainWindow):
         tab_bar.setExpanding(False)
         tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
         tab_bar.setUsesScrollButtons(True)
+        tab_bar.tabCloseRequested.connect(self._on_tab_close_requested)
         self.tabs.setUsesScrollButtons(True)
         self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
         self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -525,10 +617,54 @@ class MainWindow(QMainWindow):
         self.appsearch_tab.uninstallRequested.connect(self._on_appsearch_uninstall)
         self.tabs.addTab(self.appsearch_tab, self.tr("Pesquisa de Aplicativos"))
         idx = self.tabs.indexOf(self.appsearch_tab)
-        self.tabs.tabBar().setTabData(idx, "\uE721")  # Search
+        bar = self.tabs.tabBar()
+        if isinstance(bar, _Mdl2TabBar):
+            bar.set_tab_meta(idx, "\uE721", closable=True)
+        else:
+            bar.setTabData(idx, "\uE721")
         self._refresh_tab_bar_layout()
         self.tabs.setCurrentIndex(idx)
         self._update_psinfo_mode_ui()
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        """Fecha abas com X no título (Pesquisa / Configurações)."""
+        widget = self.tabs.widget(index)
+        if widget is None:
+            return
+        if widget is self.appsearch_tab:
+            self._close_appsearch_tab()
+        elif widget is self.settings_tab:
+            self._close_settings_tab()
+
+    def _close_appsearch_tab(self) -> None:
+        """Fecha a Pesquisa somente pelo X ao lado do título da aba."""
+        if self.appsearch_tab is None:
+            return
+        idx = self.tabs.indexOf(self.appsearch_tab)
+        if idx != -1:
+            self.tabs.removeTab(idx)
+        try:
+            self.appsearch_tab.shutdown()
+        except Exception:
+            pass
+        self.appsearch_tab.deleteLater()
+        self.appsearch_tab = None
+        self._update_psinfo_mode_ui()
+        self._last_tab_widget = self.tabs.currentWidget()
+        self._refresh_tab_bar_layout()
+
+    def _close_settings_tab(self) -> None:
+        """Fecha Configurações somente pelo X ao lado do título da aba."""
+        if self.settings_tab is None:
+            return
+        idx = self.tabs.indexOf(self.settings_tab)
+        if idx != -1:
+            self.tabs.removeTab(idx)
+        self.settings_tab.deleteLater()
+        self.settings_tab = None
+        self._update_psinfo_mode_ui()
+        self._last_tab_widget = self.tabs.currentWidget()
+        self._refresh_tab_bar_layout()
 
     def _on_psinfo_uninstall(self, remote_cmd: str, app_label: str) -> None:
         """Desinstalação a partir do inventário PsInfo (host da aba PsExec)."""
@@ -574,7 +710,11 @@ class MainWindow(QMainWindow):
         self.settings_tab.pstoolsPathChanged.connect(self._on_pstools_path_changed)
         self.tabs.addTab(self.settings_tab, self.tr("Configurações"))
         idx = self.tabs.indexOf(self.settings_tab)
-        self.tabs.tabBar().setTabData(idx, "\uE713")  # Settings / engrenagem
+        bar = self.tabs.tabBar()
+        if isinstance(bar, _Mdl2TabBar):
+            bar.set_tab_meta(idx, "\uE713", closable=True)  # Settings / engrenagem
+        else:
+            bar.setTabData(idx, "\uE713")
         self._refresh_tab_bar_layout()
         self.tabs.setCurrentIndex(idx)
         self._update_psinfo_mode_ui()
@@ -583,7 +723,8 @@ class MainWindow(QMainWindow):
         self.update_command()
 
     def _on_tab_changed(self, _index: int) -> None:
-        # Se o usuário saiu da aba PsInfo / Pesquisa / Configurações, encerrá-la
+        # PsInfo: fecha ao sair da aba.
+        # Pesquisa / Configurações: permanecem abertas; só fecham pelo X do título.
         prev = self._last_tab_widget
         current = self.tabs.currentWidget()
         if self.psinfo_tab is not None:
@@ -597,24 +738,6 @@ class MainWindow(QMainWindow):
                     pass
                 self.psinfo_tab.deleteLater()
                 self.psinfo_tab = None
-        if self.appsearch_tab is not None:
-            if prev == self.appsearch_tab and current != self.appsearch_tab:
-                idx = self.tabs.indexOf(self.appsearch_tab)
-                if idx != -1:
-                    self.tabs.removeTab(idx)
-                try:
-                    self.appsearch_tab.shutdown()
-                except Exception:
-                    pass
-                self.appsearch_tab.deleteLater()
-                self.appsearch_tab = None
-        if self.settings_tab is not None:
-            if prev == self.settings_tab and current != self.settings_tab:
-                idx = self.tabs.indexOf(self.settings_tab)
-                if idx != -1:
-                    self.tabs.removeTab(idx)
-                self.settings_tab.deleteLater()
-                self.settings_tab = None
         self._update_psinfo_mode_ui()
         self._last_tab_widget = self.tabs.currentWidget()
         # Aba PowerShell/CMD ativa muda o método de montagem do comando
