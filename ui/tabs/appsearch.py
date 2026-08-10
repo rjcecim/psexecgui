@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -135,26 +135,33 @@ class _AppSearchWorker(QThread):
             futures = {
                 executor.submit(self._scan_host, host, q): host for host in self.hosts
             }
+            pending = set(futures.keys())
             try:
-                for fut in as_completed(futures):
-                    if self._abort:
-                        # Não processa resultados tardios na UI após interrupção.
-                        break
-                    host = futures[fut]
-                    try:
-                        host, hits, ok, error_kind = fut.result()
-                    except Exception:
-                        hits = []
-                        ok = False
-                        error_kind = "unreachable"
-                    if self._abort:
-                        break
-                    done += 1
-                    if not ok:
-                        failed += 1
-                    self.progress.emit(done, failed, total, host, ok, error_kind)
-                    if hits:
-                        self.hitsFound.emit(hits)
+                # wait(timeout) permite reagir a abort() sem ficar preso em fut.result()
+                # enquanto uma consulta Remote Registry ainda não retornou.
+                while pending and not self._abort:
+                    done_set, pending = wait(
+                        pending, timeout=0.25, return_when=FIRST_COMPLETED
+                    )
+                    if not done_set:
+                        continue
+                    for fut in done_set:
+                        if self._abort:
+                            pending.clear()
+                            break
+                        host = futures[fut]
+                        try:
+                            host, hits, ok, error_kind = fut.result()
+                        except Exception:
+                            hits = []
+                            ok = False
+                            error_kind = "unreachable"
+                        done += 1
+                        if not ok:
+                            failed += 1
+                        self.progress.emit(done, failed, total, host, ok, error_kind)
+                        if hits:
+                            self.hitsFound.emit(hits)
             finally:
                 # Cancela futuros ainda não iniciados; workers Win32 já em voo
                 # podem continuar em segundo plano (limitação da API).
@@ -397,11 +404,7 @@ class AppSearchTab(QWidget):
         if path:
             self._set_hosts_path(path)
 
-    def _abort_worker(self, _destroyed: object = None) -> None:
-        w = self._worker
-        if w is None:
-            return
-        self._worker = None
+    def _disconnect_worker_signals(self, w: _AppSearchWorker) -> None:
         for signal, slot in (
             (w.progress, self._on_progress),
             (w.hitsFound, self._on_hits_found),
@@ -414,7 +417,35 @@ class AppSearchTab(QWidget):
                 signal.disconnect(slot)
             except TypeError:
                 pass
+
+    def _abort_worker(self, _destroyed: object = None) -> None:
+        w = self._worker
+        if w is None:
+            return
+        self._worker = None
+        self._accepting_search_results = False
+        self._disconnect_worker_signals(w)
         w.abort()
+        if w.isRunning():
+            # destroyed/close: espera um pouco para a QThread sair do run()
+            # (agora abort é responsivo via wait(timeout) no pool).
+            w.wait(3000)
+        if w.isRunning():
+            w.finished.connect(w.deleteLater)
+        else:
+            w.deleteLater()
+
+    def shutdown(self, wait_ms: int = 5000) -> None:
+        """Aborta pesquisa e espera a QThread — chamar antes de fechar/remover a aba."""
+        self._accepting_search_results = False
+        w = self._worker
+        if w is None:
+            return
+        self._worker = None
+        self._disconnect_worker_signals(w)
+        w.abort()
+        if w.isRunning():
+            w.wait(max(0, int(wait_ms)))
         if w.isRunning():
             w.finished.connect(w.deleteLater)
         else:
@@ -664,11 +695,6 @@ class AppSearchTab(QWidget):
         computers = {h.host.casefold() for h in self._hits}
         count_hosts = len(computers)
         count_apps = len(self._hits)
-        failed = self._hosts_failed
-        total = self._hosts_total
-        fail_part = ""
-        if total > 0 and (failed > 0 or final or interrupted):
-            fail_part = self.tr(f" — {failed} de {total} falharam")
 
         if count_apps == 0:
             if final:
@@ -678,18 +704,15 @@ class AppSearchTab(QWidget):
                             f"Pesquisa interrompida — nenhum computador com "
                             f"aplicativo correspondente a “{query}” até o momento."
                         )
-                        + fail_part
                     )
                 else:
                     self.summary_lbl.setText(
                         self.tr(
                             f"Nenhum computador com aplicativo correspondente a “{query}”."
                         )
-                        + fail_part
                     )
             else:
-                base = self.tr("Pesquisando...")
-                self.summary_lbl.setText(base + fail_part if fail_part else base)
+                self.summary_lbl.setText(self.tr("Pesquisando..."))
             return
         if interrupted:
             prefix = self.tr("Interrompida — ")
@@ -700,10 +723,8 @@ class AppSearchTab(QWidget):
         self.summary_lbl.setText(
             self.tr(
                 f"{prefix}Aplicativo encontrado em {count_hosts} computador(es) "
-                f"({count_apps} correspondência(s) para “{query}”)"
+                f"({count_apps} correspondência(s) para “{query}”)."
             )
-            + fail_part
-            + "."
         )
 
     def _append_hit_row(self, hit: SearchHit) -> None:

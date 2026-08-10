@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from core.models import CommandSpec, OperationStatus
-from core.win_cmd import open_external_console_argv, quote_for_cmd
+from core.win_cmd import (
+    open_external_console_argv,
+    open_external_console_argv_keep_open,
+    quote_for_cmd,
+)
 from core.win_cmdline import split_windows_command_line
 from utils.app_logging import log_operation
 from utils.pstools import resolve_pstools_tool
@@ -327,10 +331,12 @@ class RemoteUninstallService:
         log_operation("uninstall", detail=display_cmd, passwords=creds.passwords)
 
         try:
-            open_external_console_argv(real_argv)
+            # Mantém a janela aberta sem serializar o argv via cmd /k
+            # (cmd /k quebrava aspas do msiexec remoto).
+            open_external_console_argv_keep_open(real_argv)
             msg = (
-                f"[{log_tag}] Execução iniciada em terminal externo; "
-                "resultado remoto não monitorado."
+                f"[{log_tag}] Execução iniciada em terminal externo "
+                "(janela permanece aberta); resultado remoto não monitorado."
             )
             log(msg)
             return UninstallLaunchResult(

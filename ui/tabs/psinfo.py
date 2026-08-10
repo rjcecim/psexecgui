@@ -331,6 +331,35 @@ class PsInfoTab(QWidget):
         except TypeError:
             pass
         if w.isRunning():
+            # PsInfo pode estar em subprocess.run (até PSINFO_TIMEOUT_SECONDS);
+            # evita destruir a QThread no meio do voo.
+            w.wait(3000)
+        if w.isRunning():
+            w.finished.connect(w.deleteLater)
+        else:
+            w.deleteLater()
+
+    def shutdown(self, wait_ms: int = 5000) -> None:
+        """Espera o worker do PsInfo — chamar antes de fechar/remover a aba."""
+        w = self._worker
+        if w is None:
+            return
+        self._worker = None
+        try:
+            w.finished_ok.disconnect(self._on_psinfo_ok)
+        except TypeError:
+            pass
+        try:
+            w.finished_err.disconnect(self._on_psinfo_err)
+        except TypeError:
+            pass
+        try:
+            w.finished.disconnect(self._on_worker_thread_finished)
+        except TypeError:
+            pass
+        if w.isRunning():
+            w.wait(max(0, int(wait_ms)))
+        if w.isRunning():
             w.finished.connect(w.deleteLater)
         else:
             w.deleteLater()

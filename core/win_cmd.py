@@ -6,16 +6,23 @@ Estratégia de console externo:
   (CreateProcess recebe a lista corretamente; sem re-serialização via cmd.exe).
 - ``cmd.exe /k`` só quando explicitamente necessário; o quoting do cmd.exe
   **não** garante round-trip seguro para credenciais com metacaracteres.
+- Para manter a janela aberta sem quebrar aspas aninhadas (ex.: msiexec remoto),
+  usar ``open_external_console_argv_keep_open`` (PowerShell + argv via env).
 """
 
 from __future__ import annotations
 
+import base64
+import json
+import os
 import subprocess
 import sys
 from typing import Optional, Sequence
 
 CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+_KEEPOPEN_ENV = "PSEXECGUI_KEEPOPEN_ARGV"
 
 
 def quote_for_cmd(arg: str) -> str:
@@ -91,6 +98,65 @@ def open_external_console_argv(
     """
     del title  # reservado para futuras melhorias (SetConsoleTitle)
     return popen_argv(list(argv), creationflags=CREATE_NEW_CONSOLE)
+
+
+def open_external_console_argv_keep_open(
+    argv: Sequence[str],
+    *,
+    title: str = "PSExecGUI",
+) -> subprocess.Popen:
+    """
+    Como ``open_external_console_argv``, mas a janela espera Enter ao terminar.
+
+    Não usa ``cmd /k`` com o argv serializado — isso quebra aspas aninhadas
+    (ex.: ``cmd /c msiexec /x "{GUID}"`` remoto). O argv vai em env (base64 JSON)
+    e o PowerShell invoca com splatting (``& $exe @args``), preservando cada
+    argumento intacto.
+    """
+    del title
+    if not argv:
+        raise ValueError("argv vazio")
+
+    payload = base64.b64encode(
+        json.dumps(list(argv), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+
+    # Script curto: UTF-16LE + -EncodedCommand evita quoting do -Command.
+    ps = (
+        "$ErrorActionPreference = 'Continue'\n"
+        f"$raw = $env:{_KEEPOPEN_ENV}\n"
+        f"Remove-Item Env:{_KEEPOPEN_ENV} -ErrorAction SilentlyContinue\n"
+        "if (-not $raw) { Write-Host 'argv ausente'; Read-Host 'Enter'; exit 1 }\n"
+        "$argv = [System.Text.Encoding]::UTF8.GetString("
+        "[System.Convert]::FromBase64String($raw)) | ConvertFrom-Json\n"
+        "if (-not $argv -or @($argv).Count -lt 1) { "
+        "Write-Host 'argv vazio'; Read-Host 'Enter'; exit 1 }\n"
+        "$exe = [string]$argv[0]\n"
+        "$argList = @()\n"
+        "if (@($argv).Count -gt 1) { "
+        "$argList = @($argv[1..(@($argv).Count-1)] | ForEach-Object { [string]$_ }) }\n"
+        "& $exe @argList\n"
+        "Write-Host ''\n"
+        "Write-Host ('Codigo de saida: ' + $LASTEXITCODE)\n"
+        "Write-Host ''\n"
+        "Read-Host 'Pressione Enter para fechar'\n"
+    )
+    encoded = base64.b64encode(ps.encode("utf-16le")).decode("ascii")
+    env = os.environ.copy()
+    env[_KEEPOPEN_ENV] = payload
+    return popen_argv(
+        [
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded,
+        ],
+        creationflags=CREATE_NEW_CONSOLE,
+        env=env,
+    )
 
 
 def open_external_cmd_k(command_line: str, *, title: str = "PSExecGUI") -> subprocess.Popen:

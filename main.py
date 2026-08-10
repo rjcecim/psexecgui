@@ -591,6 +591,10 @@ class MainWindow(QMainWindow):
                 idx = self.tabs.indexOf(self.psinfo_tab)
                 if idx != -1:
                     self.tabs.removeTab(idx)
+                try:
+                    self.psinfo_tab.shutdown()
+                except Exception:
+                    pass
                 self.psinfo_tab.deleteLater()
                 self.psinfo_tab = None
         if self.appsearch_tab is not None:
@@ -598,6 +602,10 @@ class MainWindow(QMainWindow):
                 idx = self.tabs.indexOf(self.appsearch_tab)
                 if idx != -1:
                     self.tabs.removeTab(idx)
+                try:
+                    self.appsearch_tab.shutdown()
+                except Exception:
+                    pass
                 self.appsearch_tab.deleteLater()
                 self.appsearch_tab = None
         if self.settings_tab is not None:
@@ -1137,6 +1145,21 @@ class MainWindow(QMainWindow):
         os.execl(python, python, *sys.argv)
 
     def closeEvent(self, event):
+        # Encerra workers Qt antes de destruir widgets (evita
+        # "QThread: Destroyed while thread is still running").
+        for tab in (getattr(self, "appsearch_tab", None), getattr(self, "psinfo_tab", None)):
+            if tab is not None:
+                try:
+                    tab.shutdown()
+                except Exception:
+                    pass
+        if hasattr(self, "psexec_tab") and self.psexec_tab is not None:
+            worker = getattr(self.psexec_tab, "_host_status_worker", None)
+            if worker is not None and worker.isRunning():
+                try:
+                    worker.wait(2000)
+                except Exception:
+                    pass
         self.executor.stop()
         if hasattr(self.executor, "shutdown"):
             try:
